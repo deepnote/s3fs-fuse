@@ -5474,7 +5474,7 @@ int main(int argc, char* argv[])
 {
     int ch;
     int fuse_res;
-    int option_index = 0;
+    int option_index = 0; 
     struct fuse_operations s3fs_oper{};
     time_t incomp_abort_time = (24 * 60 * 60);
     S3fsLog singletonLog;
