@@ -18,8 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cstdlib>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -31,7 +31,7 @@
 // This program truncates the file and reads the file in another process
 // between truncate and flush(close file).
 //
-int main(int argc, char *argv[])
+int main(int argc, const char *argv[])
 {
     if(argc != 3){
         fprintf(stderr, "[ERROR] Wrong paraemters\n");
@@ -40,7 +40,7 @@ int main(int argc, char *argv[])
     }
 
     const char* filepath = argv[1];
-    off_t       size     = static_cast<off_t>(strtoull(argv[2], nullptr, 10));
+    auto        size     = static_cast<off_t>(strtoull(argv[2], nullptr, 10));
     int         fd;
 
     // open file

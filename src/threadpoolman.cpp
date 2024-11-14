@@ -18,19 +18,21 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <errno.h>
-#include <stdint.h>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 #include "s3fs_logger.h"
 #include "threadpoolman.h"
-#include "autolock.h"
 
 //------------------------------------------------
 // ThreadPoolMan class variables
 //------------------------------------------------
-ThreadPoolMan* ThreadPoolMan::singleton = nullptr;
+std::unique_ptr<ThreadPoolMan> ThreadPoolMan::singleton;
 
 //------------------------------------------------
 // ThreadPoolMan class methods
@@ -38,115 +40,118 @@ ThreadPoolMan* ThreadPoolMan::singleton = nullptr;
 bool ThreadPoolMan::Initialize(int count)
 {
     if(ThreadPoolMan::singleton){
-        S3FS_PRN_WARN("Already singleton for Thread Manager is existed, then re-create it.");
-        ThreadPoolMan::Destroy();
+        S3FS_PRN_CRIT("Already singleton for Thread Manager exists.");
+        abort();
     }
-    ThreadPoolMan::singleton = new ThreadPoolMan(count);
+    ThreadPoolMan::singleton.reset(new ThreadPoolMan(count));
     return true;
 }
 
 void ThreadPoolMan::Destroy()
 {
-    if(ThreadPoolMan::singleton){
-        delete ThreadPoolMan::singleton;
-        ThreadPoolMan::singleton = nullptr;
-    }
+    ThreadPoolMan::singleton.reset();
 }
 
-bool ThreadPoolMan::Instruct(thpoolman_param* pparam)
+bool ThreadPoolMan::Instruct(const thpoolman_param& param)
 {
     if(!ThreadPoolMan::singleton){
         S3FS_PRN_WARN("The singleton object is not initialized yet.");
         return false;
     }
-    return ThreadPoolMan::singleton->SetInstruction(pparam);
+    if(!param.psem){
+        S3FS_PRN_ERR("Thread parameter Semaphore is null.");
+        return false;
+    }
+    ThreadPoolMan::singleton->SetInstruction(param);
+    return true;
+}
+
+bool ThreadPoolMan::AwaitInstruct(const thpoolman_param& param)
+{
+    if(!ThreadPoolMan::singleton){
+        S3FS_PRN_WARN("The singleton object is not initialized yet.");
+        return false;
+    }
+    if(param.psem){
+        S3FS_PRN_ERR("Thread parameter Semaphore must be null.");
+        return false;
+    }
+
+    // Setup local thpoolman_param structure with local Semaphore
+    thpoolman_param local_param;
+    Semaphore       await_sem(0);
+    local_param.args  = param.args;
+    local_param.psem  = &await_sem;
+    local_param.pfunc = param.pfunc;
+
+    // Set parameters and run thread worker
+    ThreadPoolMan::singleton->SetInstruction(local_param);
+
+    // wait until the thread is complete
+    await_sem.acquire();
+
+    return true;
 }
 
 //
 // Thread worker
 //
-void* ThreadPoolMan::Worker(void* arg)
+void ThreadPoolMan::Worker(ThreadPoolMan* psingleton, std::promise<int> promise)
 {
-    ThreadPoolMan* psingleton = static_cast<ThreadPoolMan*>(arg);
-
     if(!psingleton){
         S3FS_PRN_ERR("The parameter for worker thread is invalid.");
-        return reinterpret_cast<void*>(-EIO);
+        promise.set_value(-EIO);
+        return;
     }
     S3FS_PRN_INFO3("Start worker thread in ThreadPoolMan.");
 
     while(!psingleton->IsExit()){
         // wait
-        psingleton->thpoolman_sem.wait();
+        psingleton->thpoolman_sem.acquire();
 
         if(psingleton->IsExit()){
             break;
         }
 
         // get instruction
-        thpoolman_param* pparam;
+        thpoolman_param param;
         {
-            AutoLock auto_lock(&(psingleton->thread_list_lock));
+            const std::lock_guard<std::mutex> lock(psingleton->thread_list_lock);
 
-            if(!psingleton->instruction_list.empty()){
-                pparam = psingleton->instruction_list.front();
-                psingleton->instruction_list.pop_front();
-                if(!pparam){
-                    S3FS_PRN_WARN("Got a semaphore, but the instruction is empty.");
-                }
+            if(psingleton->instruction_list.empty()){
+                S3FS_PRN_DBG("Got a semaphore, but the instruction is empty.");
+                continue;
             }else{
-                S3FS_PRN_WARN("Got a semaphore, but there is no instruction.");
-                pparam = nullptr;
+                param = psingleton->instruction_list.front();
+                psingleton->instruction_list.pop_front();
             }
         }
 
-        if(pparam){
-            void* retval     = pparam->pfunc(pparam->args);
-            if(nullptr != retval){
-                S3FS_PRN_WARN("The instruction function returned with somthign error code(%ld).", reinterpret_cast<long>(retval));
-            }
-            if(pparam->psem){
-                pparam->psem->post();
-            }
-            delete pparam;
+        void* retval = param.pfunc(param.args);
+        if(nullptr != retval){
+            S3FS_PRN_WARN("The instruction function returned with something error code(%ld).", reinterpret_cast<long>(retval));
+        }
+        if(param.psem){
+            param.psem->release();
         }
     }
 
-    return nullptr;
+    promise.set_value(0);
 }
 
 //------------------------------------------------
 // ThreadPoolMan methods
 //------------------------------------------------
-ThreadPoolMan::ThreadPoolMan(int count) : is_exit(false), thpoolman_sem(0), is_lock_init(false), is_exit_flag_init(false)
+ThreadPoolMan::ThreadPoolMan(int count) : is_exit(false), thpoolman_sem(0)
 {
     if(count < 1){
         S3FS_PRN_CRIT("Failed to creating singleton for Thread Manager, because thread count(%d) is under 1.", count);
         abort();
     }
     if(ThreadPoolMan::singleton){
-        S3FS_PRN_CRIT("Already singleton for Thread Manager is existed.");
+        S3FS_PRN_CRIT("Already singleton for Thread Manager exists.");
         abort();
     }
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-
-    int result;
-    if(0 != (result = pthread_mutex_init(&thread_list_lock, &attr))){
-        S3FS_PRN_CRIT("failed to init thread_list_lock: %d", result);
-        abort();
-    }
-    is_lock_init = true;
-
-    if(0 != (result = pthread_mutex_init(&thread_exit_flag_lock, &attr))){
-        S3FS_PRN_CRIT("failed to init thread_exit_flag_lock: %d", result);
-        abort();
-    }
-    is_exit_flag_init = true;
 
     // create threads
     if(!StartThreads(count)){
@@ -158,39 +163,22 @@ ThreadPoolMan::ThreadPoolMan(int count) : is_exit(false), thpoolman_sem(0), is_l
 ThreadPoolMan::~ThreadPoolMan()
 {
     StopThreads();
-
-    if(is_lock_init){
-        int result;
-        if(0 != (result = pthread_mutex_destroy(&thread_list_lock))){
-            S3FS_PRN_CRIT("failed to destroy thread_list_lock: %d", result);
-            abort();
-        }
-        is_lock_init = false;
-    }
-    if(is_exit_flag_init ){
-        int result;
-        if(0 != (result = pthread_mutex_destroy(&thread_exit_flag_lock))){
-            S3FS_PRN_CRIT("failed to destroy thread_exit_flag_lock: %d", result);
-            abort();
-        }
-        is_exit_flag_init  = false;
-    }
 }
 
 bool ThreadPoolMan::IsExit() const
 {
-    AutoLock auto_lock(&thread_exit_flag_lock);
     return is_exit;
 }
 
 void ThreadPoolMan::SetExitFlag(bool exit_flag)
 {
-    AutoLock auto_lock(&thread_exit_flag_lock);
     is_exit = exit_flag;
 }
 
 bool ThreadPoolMan::StopThreads()
 {
+    const std::lock_guard<std::mutex> lock(thread_list_lock);
+
     if(thread_list.empty()){
         S3FS_PRN_INFO("Any threads are running now, then nothing to do.");
         return true;
@@ -199,31 +187,20 @@ bool ThreadPoolMan::StopThreads()
     // all threads to exit
     SetExitFlag(true);
     for(size_t waitcnt = thread_list.size(); 0 < waitcnt; --waitcnt){
-        thpoolman_sem.post();
+        thpoolman_sem.release();
     }
 
     // wait for threads exiting
-    for(thread_list_t::const_iterator iter = thread_list.begin(); iter != thread_list.end(); ++iter){
-        void* retval = nullptr;
-        int   result = pthread_join(*iter, &retval);
-        if(result){
-            S3FS_PRN_ERR("failed pthread_join - result(%d)", result);
-        }else{
-            S3FS_PRN_DBG("succeed pthread_join - return code(%ld)", reinterpret_cast<long>(retval));
-        }
+    for(auto& pair : thread_list){
+        pair.first.join();
+        long retval = pair.second.get();
+        S3FS_PRN_DBG("join succeeded - return code(%ld)", reinterpret_cast<long>(retval));
     }
     thread_list.clear();
 
     // reset semaphore(to zero)
-    while(thpoolman_sem.try_wait()){
+    while(thpoolman_sem.try_acquire()){
     }
-
-    // clear instructions
-    for(thpoolman_params_t::const_iterator iter = instruction_list.begin(); iter != instruction_list.end(); ++iter){
-        thpoolman_param* pparam = *iter;
-        delete pparam;
-    }
-    instruction_list.clear();
 
     return true;
 }
@@ -247,35 +224,26 @@ bool ThreadPoolMan::StartThreads(int count)
     SetExitFlag(false);
     for(int cnt = 0; cnt < count; ++cnt){
         // run thread
-        pthread_t thread;
-        int       result;
-        if(0 != (result = pthread_create(&thread, nullptr, ThreadPoolMan::Worker, static_cast<void*>(this)))){
-            S3FS_PRN_ERR("failed pthread_create with return code(%d)", result);
-            StopThreads();        // if possible, stop all threads
-            return false;
-        }
-        thread_list.push_back(thread);
+        std::promise<int> promise;
+        std::future<int> future = promise.get_future();
+        std::thread thread(ThreadPoolMan::Worker, this, std::move(promise));
+
+        const std::lock_guard<std::mutex> lock(thread_list_lock);
+        thread_list.emplace_back(std::move(thread), std::move(future));
     }
     return true;
 }
 
-bool ThreadPoolMan::SetInstruction(thpoolman_param* pparam)
+void ThreadPoolMan::SetInstruction(const thpoolman_param& param)
 {
-    if(!pparam){
-        S3FS_PRN_ERR("The parameter value is nullptr.");
-        return false;
-    }
-
     // set parameter to list
     {
-        AutoLock auto_lock(&thread_list_lock);
-        instruction_list.push_back(pparam);
+        const std::lock_guard<std::mutex> lock(thread_list_lock);
+        instruction_list.push_back(param);
     }
 
     // run thread
-    thpoolman_sem.post();
-
-    return true;
+    thpoolman_sem.release();
 }
 
 /*

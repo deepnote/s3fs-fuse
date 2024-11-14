@@ -21,7 +21,10 @@
 #ifndef S3FS_S3FS_UTIL_H_
 #define S3FS_S3FS_UTIL_H_
 
+#include <cstdint>
 #include <functional>
+#include <string>
+#include <sys/stat.h>
 
 #ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME          0
@@ -42,8 +45,6 @@ void init_sysconf_vars();
 std::string get_username(uid_t uid);
 int is_uid_include_group(uid_t uid, gid_t gid);
 
-bool init_basename_lock();
-bool destroy_basename_lock();
 std::string mydirname(const char* path);
 std::string mydirname(const std::string& path);
 std::string mybasename(const char* path);
@@ -61,12 +62,16 @@ void print_launch_message(int argc, char** argv);
 //
 // Utility for nanosecond time(timespec)
 //
-enum class stat_time_type{
+enum class stat_time_type : uint8_t {
     ATIME,
     MTIME,
     CTIME
 };
-extern const struct timespec S3FS_OMIT_TS;
+
+//-------------------------------------------------------------------
+// Utility for nanosecond time(timespec)
+//-------------------------------------------------------------------
+static constexpr struct timespec S3FS_OMIT_TS = {0, UTIME_OMIT};
 
 int compare_timespec(const struct timespec& ts1, const struct timespec& ts2);
 int compare_timespec(const struct stat& st, stat_time_type type, const struct timespec& ts);

@@ -66,8 +66,10 @@ AWSCLI_ZIP_FILE="awscliv2.zip"
 #-----------------------------------------------------------
 # Parameters for configure(set environments)
 #-----------------------------------------------------------
-# shellcheck disable=SC2089
-CONFIGURE_OPTIONS="CXXFLAGS='-O -std=c++03 -DS3FS_PTHREAD_ERRORCHECK=1' --prefix=/usr --with-openssl"
+CXX="g++"
+CXXFLAGS="-O -DS3FS_PTHREAD_ERRORCHECK=1"
+LDFLAGS=""
+CONFIGURE_OPTIONS="--prefix=/usr --with-openssl"
 
 #-----------------------------------------------------------
 # OS dependent variables
@@ -80,12 +82,21 @@ PACKAGE_INSTALL_ADDITIONAL_OPTIONS=""
 SHELLCHECK_DIRECT_INSTALL=0
 AWSCLI_DIRECT_INSTALL=1
 
-if [ "${CONTAINER_FULLNAME}" = "ubuntu:23.04" ]; then
+if [ "${CONTAINER_FULLNAME}" = "ubuntu:24.10" ]; then
     PACKAGE_MANAGER_BIN="apt-get"
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"
 
-    INSTALL_PACKAGES="autoconf autotools-dev clang-tidy openjdk-17-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mime-support libtool pkg-config libssl-dev attr curl python3-pip unzip"
+    INSTALL_PACKAGES="autoconf autotools-dev clang-tidy openjdk-21-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mailcap libtool pkg-config libssl-dev attr curl python3-pip unzip"
+    INSTALL_CHECKER_PKGS="cppcheck shellcheck"
+    INSTALL_CHECKER_PKG_OPTIONS=""
+
+elif [ "${CONTAINER_FULLNAME}" = "ubuntu:24.04" ]; then
+    PACKAGE_MANAGER_BIN="apt-get"
+    PACKAGE_UPDATE_OPTIONS="update -y -qq"
+    PACKAGE_INSTALL_OPTIONS="install -y"
+
+    INSTALL_PACKAGES="autoconf autotools-dev clang-tidy openjdk-21-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mailcap libtool pkg-config libssl-dev attr curl python3-pip unzip"
     INSTALL_CHECKER_PKGS="cppcheck shellcheck"
     INSTALL_CHECKER_PKG_OPTIONS=""
 
@@ -103,7 +114,7 @@ elif [ "${CONTAINER_FULLNAME}" = "ubuntu:20.04" ]; then
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"
 
-    INSTALL_PACKAGES="autoconf autotools-dev clang-tidy openjdk-17-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mime-support libtool pkg-config libssl-dev attr curl python3-pip unzip"
+    INSTALL_PACKAGES="autoconf autotools-dev openjdk-17-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mime-support libtool pkg-config libssl-dev attr curl python3-pip unzip"
     INSTALL_CHECKER_PKGS="cppcheck shellcheck"
     INSTALL_CHECKER_PKG_OPTIONS=""
 
@@ -121,16 +132,7 @@ elif [ "${CONTAINER_FULLNAME}" = "debian:bullseye" ]; then
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"
 
-    INSTALL_PACKAGES="autoconf autotools-dev clang-tidy openjdk-17-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mime-support libtool pkg-config libssl-dev attr curl procps python3-pip unzip"
-    INSTALL_CHECKER_PKGS="cppcheck shellcheck"
-    INSTALL_CHECKER_PKG_OPTIONS=""
-
-elif [ "${CONTAINER_FULLNAME}" = "debian:buster" ]; then
-    PACKAGE_MANAGER_BIN="apt-get"
-    PACKAGE_UPDATE_OPTIONS="update -y -qq"
-    PACKAGE_INSTALL_OPTIONS="install -y"
-
-    INSTALL_PACKAGES="autoconf autotools-dev clang-tidy default-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mime-support libtool pkg-config libssl-dev attr curl procps python3-pip unzip"
+    INSTALL_PACKAGES="autoconf autotools-dev openjdk-17-jre-headless fuse jq libfuse-dev libcurl4-openssl-dev libxml2-dev locales-all mime-support libtool pkg-config libssl-dev attr curl procps python3-pip unzip"
     INSTALL_CHECKER_PKGS="cppcheck shellcheck"
     INSTALL_CHECKER_PKG_OPTIONS=""
 
@@ -169,30 +171,16 @@ elif [ "${CONTAINER_FULLNAME}" = "rockylinux:8" ]; then
     #
     SHELLCHECK_DIRECT_INSTALL=1
 
-elif [ "${CONTAINER_FULLNAME}" = "centos:centos7" ]; then
-    PACKAGE_MANAGER_BIN="yum"
-    PACKAGE_UPDATE_OPTIONS="update -y"
-    PACKAGE_INSTALL_OPTIONS="install -y"
-
-    # [NOTE]
-    # ShellCheck version(0.3.8) is too low to check.
-    # And in this version, it cannot be passed due to following error.
-    # "shellcheck: ./test/integration-test-main.sh: hGetContents: invalid argument (invalid byte sequence)"
-    #
-    INSTALL_PACKAGES="curl-devel fuse fuse-devel gcc libstdc++-devel llvm-toolset-7-clang-tools-extra gcc-c++ glibc-langpack-en java-11-openjdk-headless libxml2-devel mailcap git automake make openssl openssl-devel attr curl python3 epel-release unzip"
-    INSTALL_CHECKER_PKGS="cppcheck jq"
-    INSTALL_CHECKER_PKG_OPTIONS="--enablerepo=epel"
-
-elif [ "${CONTAINER_FULLNAME}" = "fedora:38" ]; then
+elif [ "${CONTAINER_FULLNAME}" = "fedora:41" ]; then
     PACKAGE_MANAGER_BIN="dnf"
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"
 
-    INSTALL_PACKAGES="clang-tools-extra curl-devel fuse fuse-devel gcc libstdc++-devel gcc-c++ glibc-langpack-en java-latest-openjdk-headless jq libxml2-devel mailcap git automake make openssl openssl-devel curl attr diffutils procps python3-pip unzip"
+    INSTALL_PACKAGES="clang clang-tools-extra curl-devel fuse fuse-devel gcc libstdc++-devel gcc-c++ glibc-langpack-en java-latest-openjdk-headless jq libxml2-devel mailcap git automake make openssl openssl-devel curl attr diffutils procps python3-pip unzip libcxx libcxx-devel"
     INSTALL_CHECKER_PKGS="cppcheck ShellCheck"
     INSTALL_CHECKER_PKG_OPTIONS=""
 
-elif [ "${CONTAINER_FULLNAME}" = "fedora:37" ]; then
+elif [ "${CONTAINER_FULLNAME}" = "fedora:40" ]; then
     PACKAGE_MANAGER_BIN="dnf"
     PACKAGE_UPDATE_OPTIONS="update -y -qq"
     PACKAGE_INSTALL_OPTIONS="install -y"
@@ -206,11 +194,11 @@ elif [ "${CONTAINER_FULLNAME}" = "opensuse/leap:15" ]; then
     PACKAGE_UPDATE_OPTIONS="refresh"
     PACKAGE_INSTALL_OPTIONS="install -y"
 
-    INSTALL_PACKAGES="automake clang-tools curl-devel fuse fuse-devel gcc-c++ java-17-openjdk-headless jq libxml2-devel make openssl openssl-devel python3-pip curl attr ShellCheck unzip"
+    INSTALL_PACKAGES="automake clang-tools curl-devel fuse fuse-devel gcc-c++ java-17-openjdk-headless jq libxml2-devel make openssl openssl-devel python3-pip curl attr ShellCheck procps unzip"
     INSTALL_CHECKER_PKGS="cppcheck ShellCheck"
     INSTALL_CHECKER_PKG_OPTIONS=""
 
-elif [ "${CONTAINER_FULLNAME}" = "alpine:3.17" ]; then
+elif [ "${CONTAINER_FULLNAME}" = "alpine:3.20" ]; then
     PACKAGE_MANAGER_BIN="apk"
     PACKAGE_UPDATE_OPTIONS="update --no-progress"
     PACKAGE_INSTALL_OPTIONS="add --no-progress --no-cache"
@@ -290,8 +278,12 @@ fi
 #-----------------------------------------------------------
 echo "${PRGNAME} [INFO] Set environment for configure options"
 
-# shellcheck disable=SC2090
-export CONFIGURE_OPTIONS
+cat << EOF >> "${GITHUB_ENV}"
+CXX=${CXX}
+CXXFLAGS=${CXXFLAGS}
+LDFLAGS=${LDFLAGS}
+CONFIGURE_OPTIONS=${CONFIGURE_OPTIONS}
+EOF
 
 echo "${PRGNAME} [INFO] Finish Linux helper for installing packages."
 

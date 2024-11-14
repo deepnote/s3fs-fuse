@@ -18,9 +18,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
-#include <stdint.h>
 #include <string>
 
 #include "s3fs_logger.h"
@@ -130,7 +130,7 @@ void test_wtf8_encoding()
     std::string utf8("Hyld\xc3\xbdpi \xc3\xbej\xc3\xb3\xc3\xb0""f\xc3\xa9lagsins vex \xc3\xbar k\xc3\xa6rkomnu b\xc3\xb6li \xc3\xad \xc3\xa1st");
     std::string cp1252("Hyld\xfdpi \xfej\xf3\xf0""f\xe9lagsins vex \xfar k\xe6rkomnu b\xf6li \xed \xe1st");
     std::string broken = utf8;
-    broken[14] = 0x97;
+    broken[14] = '\x97';
     std::string mixed = ascii + utf8 + cp1252;
 
     ASSERT_EQUALS(s3fs_wtf8_encode(ascii), ascii);
@@ -197,7 +197,7 @@ void test_cr_encoding()
     ASSERT_EQUALS(get_decoded_cr_code(get_encoded_cr_code(base_mid_crper2.c_str()).c_str()), base_mid_crper2);
 }
 
-int main(int argc, char *argv[])
+int main(int argc, const char *argv[])
 {
     S3fsLog singletonLog;
 

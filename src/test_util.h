@@ -21,69 +21,70 @@
 #ifndef S3FS_TEST_UTIL_H_
 #define S3FS_TEST_UTIL_H_
 
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
-#include <stdio.h>
+#include <string>
 
 #include "string_util.h"
 
-template <typename T> void assert_equals(const T &x, const T &y, const char *file, int line)
+template <typename T> inline void assert_equals(const T &x, const T &y, const char *file, int line)
 {
     if (x != y) {
         std::cerr << x << " != " << y << " at " << file << ":" << line << std::endl;
         std::cerr << std::endl;
-        std::exit(1);
+        abort();
     }
 }
 
-template <> void assert_equals(const std::string &x, const std::string &y, const char *file, int line)
+template <> inline void assert_equals(const std::string &x, const std::string &y, const char *file, int line)
 {
     if (x != y) {
         std::cerr << x << " != " << y << " at " << file << ":" << line << std::endl;
         std::cerr << s3fs_hex_lower(reinterpret_cast<const unsigned char *>(x.c_str()), x.size()) << std::endl;
         std::cerr << s3fs_hex_lower(reinterpret_cast<const unsigned char *>(y.c_str()), y.size()) << std::endl;
-        std::exit(1);
+        abort();
     }
 }
 
 
-template <typename T> void assert_nequals(const T &x, const T &y, const char *file, int line)
+template <typename T> inline void assert_nequals(const T &x, const T &y, const char *file, int line)
 {
     if (x == y) {
         std::cerr << x << " == " << y << " at " << file << ":" << line << std::endl;
-        std::exit(1);
+        abort();
     }
 }
 
-template <> void assert_nequals(const std::string &x, const std::string &y, const char *file, int line)
+template <> inline void assert_nequals(const std::string &x, const std::string &y, const char *file, int line)
 {
     if (x == y) {
         std::cerr << x << " == " << y << " at " << file << ":" << line << std::endl;
         std::cerr << s3fs_hex_lower(reinterpret_cast<const unsigned char *>(x.c_str()), x.size()) << std::endl;
         std::cerr << s3fs_hex_lower(reinterpret_cast<const unsigned char *>(y.c_str()), y.size()) << std::endl;
-        std::exit(1);
+        abort();
     }
 }
 
-void assert_strequals(const char *x, const char *y, const char *file, int line)
+inline void assert_strequals(const char *x, const char *y, const char *file, int line)
 {
   if(x == nullptr && y == nullptr){
       return;
   // cppcheck-suppress nullPointerRedundantCheck
   } else if(x == nullptr || y == nullptr || strcmp(x, y) != 0){
       std::cerr << (x ? x : "null") << " != " << (y ? y : "null") << " at " << file << ":" << line << std::endl;
-      std::exit(1);
+      abort();
   }
 }
 
-void assert_bufequals(const char *x, size_t len1, const char *y, size_t len2, const char *file, int line)
+inline void assert_bufequals(const char *x, size_t len1, const char *y, size_t len2, const char *file, int line)
 {
     if(x == nullptr && y == nullptr){
         return;
     // cppcheck-suppress nullPointerRedundantCheck
     } else if(x == nullptr || y == nullptr || len1 != len2 || memcmp(x, y, len1) != 0){
         std::cerr << (x ? std::string(x, len1) : "null") << " != " << (y ? std::string(y, len2) : "null") << " at " << file << ":" << line << std::endl;
-        std::exit(1);
+        abort();
     }
 }
 

@@ -25,16 +25,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
-#include <pthread.h>
+#include <mutex>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/md5.h>
-#include <openssl/sha.h>
 #include <openssl/crypto.h>
 #include <openssl/err.h>
-#include <string>
+#include <thread>
 
 #include "s3fs_auth.h"
 #include "s3fs_logger.h"
@@ -44,7 +43,7 @@
 //-------------------------------------------------------------------
 const char* s3fs_crypt_lib_name()
 {
-    static const char version[] = "OpenSSL";
+    static constexpr char version[] = "OpenSSL";
 
     return version;
 }
@@ -80,26 +79,19 @@ bool s3fs_destroy_global_ssl()
 // internal use struct for openssl
 struct CRYPTO_dynlock_value
 {
-    pthread_mutex_t dyn_mutex;
+    std::mutex dyn_mutex;
 };
 
-static pthread_mutex_t* s3fs_crypt_mutex = nullptr;
+static std::unique_ptr<std::mutex[]> s3fs_crypt_mutex;
 
-static void s3fs_crypt_mutex_lock(int mode, int pos, const char* file, int line) __attribute__ ((unused));
+static void s3fs_crypt_mutex_lock(int mode, int pos, const char* file, int line) __attribute__ ((unused)) NO_THREAD_SAFETY_ANALYSIS;
 static void s3fs_crypt_mutex_lock(int mode, int pos, const char* file, int line)
 {
     if(s3fs_crypt_mutex){
-        int result;
         if(mode & CRYPTO_LOCK){
-            if(0 != (result = pthread_mutex_lock(&s3fs_crypt_mutex[pos]))){
-                S3FS_PRN_CRIT("pthread_mutex_lock returned: %d", result);
-                abort();
-            }
+            s3fs_crypt_mutex[pos].lock();
         }else{
-            if(0 != (result = pthread_mutex_unlock(&s3fs_crypt_mutex[pos]))){
-                S3FS_PRN_CRIT("pthread_mutex_unlock returned: %d", result);
-                abort();
-            }
+            s3fs_crypt_mutex[pos].unlock();
         }
     }
 }
@@ -107,43 +99,23 @@ static void s3fs_crypt_mutex_lock(int mode, int pos, const char* file, int line)
 static unsigned long s3fs_crypt_get_threadid() __attribute__ ((unused));
 static unsigned long s3fs_crypt_get_threadid()
 {
-    // For FreeBSD etc, some system's pthread_t is structure pointer.
-    // Then we use cast like C style(not C++) instead of ifdef.
-    return (unsigned long)(pthread_self());
+    return static_cast<unsigned long>(std::hash<std::thread::id>()(std::this_thread::get_id()));
 }
 
 static struct CRYPTO_dynlock_value* s3fs_dyn_crypt_mutex(const char* file, int line) __attribute__ ((unused));
 static struct CRYPTO_dynlock_value* s3fs_dyn_crypt_mutex(const char* file, int line)
 {
-    struct CRYPTO_dynlock_value* dyndata = new CRYPTO_dynlock_value();
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-    int result;
-    if(0 != (result = pthread_mutex_init(&(dyndata->dyn_mutex), &attr))){
-        S3FS_PRN_CRIT("pthread_mutex_init returned: %d", result);
-        return nullptr;
-    }
-    return dyndata;
+    return new CRYPTO_dynlock_value();
 }
 
-static void s3fs_dyn_crypt_mutex_lock(int mode, struct CRYPTO_dynlock_value* dyndata, const char* file, int line) __attribute__ ((unused));
+static void s3fs_dyn_crypt_mutex_lock(int mode, struct CRYPTO_dynlock_value* dyndata, const char* file, int line) __attribute__ ((unused)) NO_THREAD_SAFETY_ANALYSIS;
 static void s3fs_dyn_crypt_mutex_lock(int mode, struct CRYPTO_dynlock_value* dyndata, const char* file, int line)
 {
     if(dyndata){
-        int result;
         if(mode & CRYPTO_LOCK){
-            if(0 != (result = pthread_mutex_lock(&(dyndata->dyn_mutex)))){
-                S3FS_PRN_CRIT("pthread_mutex_lock returned: %d", result);
-                abort();
-            }
+            dyndata->dyn_mutex.lock();
         }else{
-            if(0 != (result = pthread_mutex_unlock(&(dyndata->dyn_mutex)))){
-                S3FS_PRN_CRIT("pthread_mutex_unlock returned: %d", result);
-                abort();
-            }
+            dyndata->dyn_mutex.unlock();
         }
     }
 }
@@ -151,14 +123,7 @@ static void s3fs_dyn_crypt_mutex_lock(int mode, struct CRYPTO_dynlock_value* dyn
 static void s3fs_destroy_dyn_crypt_mutex(struct CRYPTO_dynlock_value* dyndata, const char* file, int line) __attribute__ ((unused));
 static void s3fs_destroy_dyn_crypt_mutex(struct CRYPTO_dynlock_value* dyndata, const char* file, int line)
 {
-    if(dyndata){
-      int result = pthread_mutex_destroy(&(dyndata->dyn_mutex));
-      if(result != 0){
-          S3FS_PRN_CRIT("failed to destroy dyn_mutex");
-          abort();
-      }
-      delete dyndata;
-    }
+    delete dyndata;
 }
 
 bool s3fs_init_crypt_mutex()
@@ -173,19 +138,7 @@ bool s3fs_init_crypt_mutex()
             return false;
         }
     }
-    s3fs_crypt_mutex = new pthread_mutex_t[CRYPTO_num_locks()];
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-    for(int cnt = 0; cnt < CRYPTO_num_locks(); cnt++){
-        int result = pthread_mutex_init(&s3fs_crypt_mutex[cnt], &attr);
-        if(result != 0){
-            S3FS_PRN_CRIT("pthread_mutex_init returned: %d", result);
-            return false;
-        }
-    }
+    s3fs_crypt_mutex.reset(new std::mutex[CRYPTO_num_locks()]);
     // static lock
     CRYPTO_set_locking_callback(s3fs_crypt_mutex_lock);
     CRYPTO_set_id_callback(s3fs_crypt_get_threadid);
@@ -209,16 +162,8 @@ bool s3fs_destroy_crypt_mutex()
     CRYPTO_set_id_callback(nullptr);
     CRYPTO_set_locking_callback(nullptr);
 
-    for(int cnt = 0; cnt < CRYPTO_num_locks(); cnt++){
-        int result = pthread_mutex_destroy(&s3fs_crypt_mutex[cnt]);
-        if(result != 0){
-            S3FS_PRN_CRIT("failed to destroy s3fs_crypt_mutex[%d]", cnt);
-            abort();
-        }
-    }
     CRYPTO_cleanup_all_ex_data();
-    delete[] s3fs_crypt_mutex;
-    s3fs_crypt_mutex = nullptr;
+    s3fs_crypt_mutex.reset();
 
     return true;
 }
@@ -263,7 +208,7 @@ std::unique_ptr<unsigned char[]> s3fs_HMAC256(const void* key, size_t keylen, co
 
 bool s3fs_md5(const unsigned char* data, size_t datalen, md5_t* digest)
 {
-    unsigned int digestlen = static_cast<unsigned int>(digest->size());
+    auto digestlen = static_cast<unsigned int>(digest->size());
 
     const EVP_MD* md    = EVP_get_digestbyname("md5");
     EVP_MD_CTX*   mdctx = EVP_MD_CTX_create();
@@ -277,8 +222,7 @@ bool s3fs_md5(const unsigned char* data, size_t datalen, md5_t* digest)
 
 bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
 {
-    EVP_MD_CTX*    mdctx;
-    unsigned int   md5_digest_len = static_cast<unsigned int>(result->size());
+    auto           md5_digest_len = static_cast<unsigned int>(result->size());
     off_t          bytes;
 
     if(-1 == size){
@@ -290,30 +234,27 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
     }
 
     // instead of MD5_Init
-    mdctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(mdctx, EVP_md5(), nullptr);
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> mdctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    EVP_DigestInit_ex(mdctx.get(), EVP_md5(), nullptr);
 
     for(off_t total = 0; total < size; total += bytes){
-        const off_t len = 512;
-        char        buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
         }else if(-1 == bytes){
             // error
             S3FS_PRN_ERR("file read error(%d)", errno);
-            EVP_MD_CTX_free(mdctx);
             return false;
         }
         // instead of MD5_Update
-        EVP_DigestUpdate(mdctx, buf, bytes);
+        EVP_DigestUpdate(mdctx.get(), buf.data(), bytes);
     }
 
     // instead of MD5_Final
-    EVP_DigestFinal_ex(mdctx, result->data(), &md5_digest_len);
-    EVP_MD_CTX_free(mdctx);
+    EVP_DigestFinal_ex(mdctx.get(), result->data(), &md5_digest_len);
 
     return true;
 }
@@ -354,10 +295,9 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
     MD5_Init(&md5ctx);
 
     for(off_t total = 0; total < size; total += bytes){
-        const off_t len = 512;
-        char buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
@@ -366,7 +306,7 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
             S3FS_PRN_ERR("file read error(%d)", errno);
             return false;
         }
-        MD5_Update(&md5ctx, buf, bytes);
+        MD5_Update(&md5ctx, buf.data(), bytes);
     }
 
     MD5_Final(result->data(), &md5ctx);
@@ -384,7 +324,7 @@ bool s3fs_sha256(const unsigned char* data, size_t datalen, sha256_t* digest)
     EVP_MD_CTX*   mdctx = EVP_MD_CTX_create();
     EVP_DigestInit_ex(mdctx, md, nullptr);
     EVP_DigestUpdate(mdctx, data, datalen);
-    unsigned int digestlen = static_cast<unsigned int>(digest->size());
+    auto digestlen = static_cast<unsigned int>(digest->size());
     EVP_DigestFinal_ex(mdctx, digest->data(), &digestlen);
     EVP_MD_CTX_destroy(mdctx);
 
@@ -413,10 +353,9 @@ bool s3fs_sha256_fd(int fd, off_t start, off_t size, sha256_t* result)
     EVP_DigestInit_ex(sha256ctx, md, nullptr);
 
     for(off_t total = 0; total < size; total += bytes){
-        const off_t len = 512;
-        char buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
@@ -426,7 +365,7 @@ bool s3fs_sha256_fd(int fd, off_t start, off_t size, sha256_t* result)
             EVP_MD_CTX_destroy(sha256ctx);
             return false;
         }
-        EVP_DigestUpdate(sha256ctx, buf, bytes);
+        EVP_DigestUpdate(sha256ctx, buf.data(), bytes);
     }
     EVP_DigestFinal_ex(sha256ctx, result->data(), nullptr);
     EVP_MD_CTX_destroy(sha256ctx);

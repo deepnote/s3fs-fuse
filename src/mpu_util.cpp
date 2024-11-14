@@ -20,6 +20,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include "s3fs.h"
 #include "s3fs_logger.h"
@@ -28,6 +29,7 @@
 #include "s3fs_xml.h"
 #include "s3fs_auth.h"
 #include "string_util.h"
+#include "s3fs_threadreqs.h"
 
 //-------------------------------------------------------------------
 // Global variables
@@ -47,7 +49,7 @@ static void print_incomp_mpu_list(const incomp_mpu_list_t& list)
         printf("---------------------------------------------------------------\n");
 
         int cnt = 0;
-        for(incomp_mpu_list_t::const_iterator iter = list.begin(); iter != list.end(); ++iter, ++cnt){
+        for(auto iter = list.cbegin(); iter != list.cend(); ++iter, ++cnt){
             printf(" Path     : %s\n", (*iter).key.c_str());
             printf(" UploadId : %s\n", (*iter).id.c_str());
             printf(" Date     : %s\n", (*iter).date.c_str());
@@ -68,9 +70,8 @@ static bool abort_incomp_mpu_list(const incomp_mpu_list_t& list, time_t abort_ti
     time_t now_time = time(nullptr);
 
     // do removing.
-    S3fsCurl s3fscurl;
     bool     result = true;
-    for(incomp_mpu_list_t::const_iterator iter = list.begin(); iter != list.end(); ++iter){
+    for(auto iter = list.cbegin(); iter != list.cend(); ++iter){
         const char* tpath     = (*iter).key.c_str();
         std::string upload_id = (*iter).id;
 
@@ -85,15 +86,12 @@ static bool abort_incomp_mpu_list(const incomp_mpu_list_t& list, time_t abort_ti
             }
         }
 
-        if(0 != s3fscurl.AbortMultipartUpload(tpath, upload_id)){
+        if(0 != abort_multipart_upload_request(std::string(tpath), upload_id)){
             S3FS_PRN_EXIT("Failed to remove %s multipart uploading object.", tpath);
             result = false;
         }else{
             printf("Succeed to remove %s multipart uploading object.\n", tpath);
         }
-
-        // reset(initialize) curl object
-        s3fscurl.DestroyCurlHandle();
     }
     return result;
 }
@@ -115,15 +113,15 @@ int s3fs_utility_processing(time_t abort_time)
         // parse result(incomplete multipart upload information)
         S3FS_PRN_DBG("response body = {\n%s\n}", body.c_str());
 
-        xmlDocPtr doc;
-        if(nullptr == (doc = xmlReadMemory(body.c_str(), static_cast<int>(body.size()), "", nullptr, 0))){
+        std::unique_ptr<xmlDoc, decltype(&xmlFreeDoc)> doc(xmlReadMemory(body.c_str(), static_cast<int>(body.size()), "", nullptr, 0), xmlFreeDoc);
+        if(nullptr == doc){
             S3FS_PRN_DBG("xmlReadMemory exited with error.");
             result = EXIT_FAILURE;
 
         }else{
             // make incomplete uploads list
             incomp_mpu_list_t list;
-            if(!get_incomp_mpu_list(doc, list)){
+            if(!get_incomp_mpu_list(doc.get(), list)){
                 S3FS_PRN_DBG("get_incomp_mpu_list exited with error.");
                 result = EXIT_FAILURE;
 
@@ -139,7 +137,6 @@ int s3fs_utility_processing(time_t abort_time)
                     }
                 }
             }
-            S3FS_XMLFREEDOC(doc);
         }
     }
 

@@ -110,6 +110,7 @@ You can use "k" for short "kmsid".
 If you san specify SSE-KMS type with your <kms id> in AWS KMS, you can set it after "kmsid:" (or "k:").
 If you specify only "kmsid" ("k"), you need to set AWSSSEKMSID environment which value is <kms id>.
 You must be careful about that you can not use the KMS id which is not same EC2 region.
+Additionally, if you specify SSE-KMS, your endpoints must use Secure Sockets Layer(SSL) or Transport Layer Security(TLS).
 .TP
 \fB\-o\fR load_sse_c - specify SSE-C keys
 Specify the custom-provided encryption keys file path for decrypting at downloading.
@@ -178,6 +179,18 @@ server certificate won't be checked against the available certificate authoritie
 \fB\-o\fR ssl_verify_hostname (default="2")
 When 0, do not verify the SSL certificate against the hostname.
 .TP
+\fB\-o\fR ssl_client_cert (default="")
+Specify an SSL client certificate.
+Specify this optional parameter in the following format:
+ "<SSL Cert>[:<Cert Type>[:<Private Key>[:<Key Type>
+                                        [:<Password>]]]]"
+ <SSL Cert>: Client certificate.
+             Specify the file path or NickName(for NSS, etc.).
+ <Cert Type>: Type of certificate, default is "PEM"(optional).
+ <Private Key>: Certificate's private key file(optional).
+ <Key Type>: Type of private key, default is "PEM"(optional).
+ <Password>: Passphrase of the private key(optional). It is also possible to omit this value and specify it using the environment variable "S3FS_SSL_PRIVKEY_PASSWORD".
+.TP
 \fB\-o\fR nodnscache - disable DNS cache.
 s3fs is always using DNS cache, this option make DNS cache disable.
 .TP
@@ -226,6 +239,12 @@ option.
 sets MB to ensure disk free space. This option means the threshold of free space size on disk which is used for the cache file by s3fs.
 s3fs makes file for downloading, uploading and caching files.
 If the disk free space is smaller than this value, s3fs do not use disk space as possible in exchange for the performance.
+.TP
+\fB\-o\fR free_space_ratio (default="10")
+sets min free space ratio of the disk. The value of this option can be between 0 and 100. It will control
+the size of the cache according to this ratio to ensure that the idle ratio of the disk is greater than this value.
+For example, when the disk space is 50GB, the default value will
+ensure that the disk will reserve at least 50GB * 10%% = 5GB of remaining space.
 .TP
 \fB\-o\fR multipart_threshold (default="25")
 threshold, in MB, to use multipart upload instead of
@@ -279,7 +298,7 @@ Note that this option is still experimental and may change in the future.
 .TP
 \fB\-o\fR max_thread_count (default is "5")
 Specifies the number of threads waiting for stream uploads.
-Note that this option and Streamm Upload are still experimental and subject to change in the future.
+Note that this option and Stream Upload are still experimental and subject to change in the future.
 This option will be merged with "parallel_count" in the future.
 .TP
 \fB\-o\fR enable_content_md5 (default is disable)
@@ -410,6 +429,12 @@ This option specifies the file that describes the username and passphrase for au
 Username and passphrase are valid only for HTTP schema.
 If the HTTP proxy does not require authentication, this option is not required.
 Separate the username and passphrase with a ':' character and specify each as a URL-encoded string.
+.TP
+\fB\-o\fR ipresolve (default="whatever")
+Select what type of IP addresses to use when establishing a connection.
+Default('whatever') can use addresses of all IP versions(IPv4 and IPv6) that your system allows.
+If you specify 'IPv4', only IPv4 addresses are used.
+And when 'IPv6' is specified, only IPv6 addresses will be used.
 .TP
 \fB\-o\fR logfile - specify the log output file.
 s3fs outputs the log file to syslog. Alternatively, if s3fs is started with the "-f" option specified, the log will be output to the stdout/stderr.

@@ -19,14 +19,17 @@
  */
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <errno.h>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "common.h"
+#include "s3fs.h"
 #include "s3fs_logger.h"
 #include "s3fs_util.h"
 #include "fdcache_fdinfo.h"
@@ -35,22 +38,37 @@
 #include "curl.h"
 #include "string_util.h"
 #include "threadpoolman.h"
+#include "s3fs_threadreqs.h"
 
 //------------------------------------------------
-// PseudoFdInfo class variables
+// Structure of parameters to pass to thread
 //------------------------------------------------
-int PseudoFdInfo::max_threads     = -1;
-int PseudoFdInfo::opt_max_threads = -1;
+// [NOTE]
+// The processing related to this is currently temporarily implemented
+// in this file, but will be moved to a separate file at a later.
+//
+struct pseudofdinfo_mpupload_thparam
+{
+    PseudoFdInfo* ppseudofdinfo = nullptr;
+    std::string   path;
+    std::string   upload_id;
+    int           upload_fd = -1;
+    off_t         start = 0;
+    off_t         size = 0;
+    bool          is_copy = false;
+    int           part_num = -1;
+    etagpair*     petag = nullptr;
+};
 
 //------------------------------------------------
 // PseudoFdInfo class methods
 //------------------------------------------------
 //
-// Worker function for uploading
+// Thread Worker function for uploading
 //
 void* PseudoFdInfo::MultipartUploadThreadWorker(void* arg)
 {
-    std::unique_ptr<pseudofdinfo_thparam> pthparam(static_cast<pseudofdinfo_thparam*>(arg));
+    std::unique_ptr<pseudofdinfo_mpupload_thparam> pthparam(static_cast<pseudofdinfo_mpupload_thparam*>(arg));
     if(!pthparam || !(pthparam->ppseudofdinfo)){
         return reinterpret_cast<void*>(-EIO);
     }
@@ -58,12 +76,12 @@ void* PseudoFdInfo::MultipartUploadThreadWorker(void* arg)
 
     int       result;
     {
-        AutoLock auto_lock(&(pthparam->ppseudofdinfo->upload_list_lock));
+        const std::lock_guard<std::mutex> lock(pthparam->ppseudofdinfo->upload_list_lock);
 
         if(0 != (result = pthparam->ppseudofdinfo->last_result)){
             S3FS_PRN_DBG("Already occurred error, thus this thread worker is exiting.");
 
-            if(!pthparam->ppseudofdinfo->CompleteInstruction(result, AutoLock::ALREADY_LOCKED)){    // result will be overwritten with the same value.
+            if(!pthparam->ppseudofdinfo->CompleteInstruction(result)){    // result will be overwritten with the same value.
                 result = -EIO;
             }
             return reinterpret_cast<void*>(result);
@@ -76,7 +94,8 @@ void* PseudoFdInfo::MultipartUploadThreadWorker(void* arg)
         S3FS_PRN_ERR("failed creating s3fs curl object for uploading [path=%s][start=%lld][size=%lld][part=%d]", pthparam->path.c_str(), static_cast<long long>(pthparam->start), static_cast<long long>(pthparam->size), pthparam->part_num);
 
         // set result for exiting
-        if(!pthparam->ppseudofdinfo->CompleteInstruction(result, AutoLock::NONE)){
+        const std::lock_guard<std::mutex> lock(pthparam->ppseudofdinfo->upload_list_lock);
+        if(!pthparam->ppseudofdinfo->CompleteInstruction(result)){
             result = -EIO;
         }
         return reinterpret_cast<void*>(result);
@@ -85,17 +104,18 @@ void* PseudoFdInfo::MultipartUploadThreadWorker(void* arg)
     // Send request and get result
     if(0 == (result = s3fscurl->RequestPerform())){
         S3FS_PRN_DBG("succeed uploading [path=%s][start=%lld][size=%lld][part=%d]", pthparam->path.c_str(), static_cast<long long>(pthparam->start), static_cast<long long>(pthparam->size), pthparam->part_num);
-        if(!s3fscurl->MixMultipartPostComplete()){
+        if(!s3fscurl->MixMultipartUploadComplete()){
             S3FS_PRN_ERR("failed completion uploading [path=%s][start=%lld][size=%lld][part=%d]", pthparam->path.c_str(), static_cast<long long>(pthparam->start), static_cast<long long>(pthparam->size), pthparam->part_num);
             result = -EIO;
         }
     }else{
         S3FS_PRN_ERR("failed uploading with error(%d) [path=%s][start=%lld][size=%lld][part=%d]", result, pthparam->path.c_str(), static_cast<long long>(pthparam->start), static_cast<long long>(pthparam->size), pthparam->part_num);
     }
-    s3fscurl->DestroyCurlHandle(true, false);
+    s3fscurl->DestroyCurlHandle(false);
 
     // set result
-    if(!pthparam->ppseudofdinfo->CompleteInstruction(result, AutoLock::NONE)){
+    const std::lock_guard<std::mutex> lock(pthparam->ppseudofdinfo->upload_list_lock);
+    if(!pthparam->ppseudofdinfo->CompleteInstruction(result)){
         S3FS_PRN_WARN("This thread worker is about to end, so it doesn't return an EIO here and runs to the end.");
     }
 
@@ -105,20 +125,8 @@ void* PseudoFdInfo::MultipartUploadThreadWorker(void* arg)
 //------------------------------------------------
 // PseudoFdInfo methods
 //------------------------------------------------
-PseudoFdInfo::PseudoFdInfo(int fd, int open_flags) : pseudo_fd(-1), physical_fd(fd), flags(0), upload_fd(-1), uploaded_sem(0), instruct_count(0), completed_count(0), last_result(0)
+PseudoFdInfo::PseudoFdInfo(int fd, int open_flags) : pseudo_fd(-1), physical_fd(fd), flags(0), upload_fd(-1), instruct_count(0), completed_count(0), last_result(0), uploaded_sem(0)
 {
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-    int result;
-    if(0 != (result = pthread_mutex_init(&upload_list_lock, &attr))){
-        S3FS_PRN_CRIT("failed to init upload_list_lock: %d", result);
-        abort();
-    }
-    is_lock_init = true;
-
     if(-1 != physical_fd){
         pseudo_fd = PseudoFdManager::Get();
         flags     = open_flags;
@@ -127,24 +135,23 @@ PseudoFdInfo::PseudoFdInfo(int fd, int open_flags) : pseudo_fd(-1), physical_fd(
 
 PseudoFdInfo::~PseudoFdInfo()
 {
-    Clear();        // call before destrying the mutex
-
-    if(is_lock_init){
-      int result;
-      if(0 != (result = pthread_mutex_destroy(&upload_list_lock))){
-          S3FS_PRN_CRIT("failed to destroy upload_list_lock: %d", result);
-          abort();
-      }
-      is_lock_init = false;
-    }
+    Clear();        // call before destroying the mutex
 }
 
 bool PseudoFdInfo::Clear()
 {
     // cppcheck-suppress unmatchedSuppression
     // cppcheck-suppress knownConditionTrueFalse
-    if(!CancelAllThreads() || !ResetUploadInfo(AutoLock::NONE)){
+    if(!CancelAllThreads()){
         return false;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(upload_list_lock);
+        // cppcheck-suppress unmatchedSuppression
+        // cppcheck-suppress knownConditionTrueFalse
+        if(!ResetUploadInfo()){
+            return false;
+        }
     }
     CloseUploadFd();
 
@@ -157,18 +164,29 @@ bool PseudoFdInfo::Clear()
     return true;
 }
 
+bool PseudoFdInfo::IsUploadingHasLock() const
+{
+    return !upload_id.empty();
+}
+
+bool PseudoFdInfo::IsUploading() const
+{
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+    return IsUploadingHasLock();
+}
+
 void PseudoFdInfo::CloseUploadFd()
 {
-    AutoLock auto_lock(&upload_list_lock);
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
 
     if(-1 != upload_fd){
         close(upload_fd);
     }
 }
 
-bool PseudoFdInfo::OpenUploadFd(AutoLock::Type type)
+bool PseudoFdInfo::OpenUploadFd()
 {
-    AutoLock auto_lock(&upload_list_lock, type);
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
 
     if(-1 != upload_fd){
         // already initialized
@@ -244,14 +262,14 @@ bool PseudoFdInfo::ClearUploadInfo(bool is_cancel_mp)
             return false;
         }
     }
-    return ResetUploadInfo(AutoLock::NONE);
+
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+    return ResetUploadInfo();
 }
 
-bool PseudoFdInfo::ResetUploadInfo(AutoLock::Type type)
+bool PseudoFdInfo::ResetUploadInfo()
 {
-    AutoLock auto_lock(&upload_list_lock, type);
-
-    upload_id.erase();
+    upload_id.clear();
     upload_list.clear();
     instruct_count  = 0;
     completed_count = 0;
@@ -260,13 +278,8 @@ bool PseudoFdInfo::ResetUploadInfo(AutoLock::Type type)
     return true;
 }
 
-bool PseudoFdInfo::RowInitialUploadInfo(const std::string& id, bool is_cancel_mp, AutoLock::Type type)
+bool PseudoFdInfo::RowInitialUploadInfo(const std::string& id, bool is_cancel_mp)
 {
-    if(is_cancel_mp && AutoLock::ALREADY_LOCKED == type){
-        S3FS_PRN_ERR("Internal Error: Could not call this with type=AutoLock::ALREADY_LOCKED and is_cancel_mp=true");
-        return false;
-    }
-
     if(is_cancel_mp){
         // cppcheck-suppress unmatchedSuppression
         // cppcheck-suppress knownConditionTrueFalse
@@ -274,22 +287,27 @@ bool PseudoFdInfo::RowInitialUploadInfo(const std::string& id, bool is_cancel_mp
             return false;
         }
     }else{
+        const std::lock_guard<std::mutex> lock(upload_list_lock);
         // cppcheck-suppress unmatchedSuppression
         // cppcheck-suppress knownConditionTrueFalse
-        if(!ResetUploadInfo(type)){
+        if(!ResetUploadInfo()){
             return false;
         }
     }
 
-    AutoLock auto_lock(&upload_list_lock, type);
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
     upload_id = id;
     return true;
 }
 
-bool PseudoFdInfo::CompleteInstruction(int result, AutoLock::Type type)
+void PseudoFdInfo::IncreaseInstructionCount()
 {
-    AutoLock auto_lock(&upload_list_lock, type);
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+    ++instruct_count;
+}
 
+bool PseudoFdInfo::CompleteInstruction(int result)
+{
     if(0 != result){
         last_result = result;
     }
@@ -304,27 +322,36 @@ bool PseudoFdInfo::CompleteInstruction(int result, AutoLock::Type type)
     return true;
 }
 
-bool PseudoFdInfo::GetUploadId(std::string& id) const
+bool PseudoFdInfo::GetUploadInfo(std::string& id, int& fd) const
 {
-    if(!IsUploading()){
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+
+    if(!IsUploadingHasLock()){
         S3FS_PRN_ERR("Multipart Upload has not started yet.");
         return false;
     }
     id = upload_id;
+    fd = upload_fd;
     return true;
+}
+
+bool PseudoFdInfo::GetUploadId(std::string& id) const
+{
+    int fd = -1;
+    return GetUploadInfo(id, fd);
 }
 
 bool PseudoFdInfo::GetEtaglist(etaglist_t& list) const
 {
-    if(!IsUploading()){
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+
+    if(!IsUploadingHasLock()){
         S3FS_PRN_ERR("Multipart Upload has not started yet.");
         return false;
     }
 
-    AutoLock auto_lock(&upload_list_lock);
-
     list.clear();
-    for(filepart_list_t::const_iterator iter = upload_list.begin(); iter != upload_list.end(); ++iter){
+    for(auto iter = upload_list.cbegin(); iter != upload_list.cend(); ++iter){
         if(iter->petag){
             list.push_back(*(iter->petag));
         }else{
@@ -344,12 +371,13 @@ bool PseudoFdInfo::GetEtaglist(etaglist_t& list) const
 //
 bool PseudoFdInfo::AppendUploadPart(off_t start, off_t size, bool is_copy, etagpair** ppetag)
 {
-    if(!IsUploading()){
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+
+    if(!IsUploadingHasLock()){
         S3FS_PRN_ERR("Multipart Upload has not started yet.");
         return false;
     }
 
-    AutoLock auto_lock(&upload_list_lock);
     off_t    next_start_pos = 0;
     if(!upload_list.empty()){
         next_start_pos = upload_list.back().startpos + upload_list.back().size;
@@ -382,11 +410,13 @@ static bool filepart_partnum_compare(const filepart& src1, const filepart& src2)
     return src1.get_part_number() < src2.get_part_number();
 }
 
-bool PseudoFdInfo::InsertUploadPart(off_t start, off_t size, int part_num, bool is_copy, etagpair** ppetag, AutoLock::Type type)
+bool PseudoFdInfo::InsertUploadPart(off_t start, off_t size, int part_num, bool is_copy, etagpair** ppetag)
 {
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
+
     //S3FS_PRN_DBG("[start=%lld][size=%lld][part_num=%d][is_copy=%s]", static_cast<long long int>(start), static_cast<long long int>(size), part_num, (is_copy ? "true" : "false"));
 
-    if(!IsUploading()){
+    if(!IsUploadingHasLock()){
         S3FS_PRN_ERR("Multipart Upload has not started yet.");
         return false;
     }
@@ -394,8 +424,6 @@ bool PseudoFdInfo::InsertUploadPart(off_t start, off_t size, int part_num, bool 
         S3FS_PRN_ERR("Parameters are wrong.");
         return false;
     }
-
-    AutoLock auto_lock(&upload_list_lock, type);
 
     // insert new part
     etagpair*   petag_entity = etag_entities.add(etagpair(nullptr, part_num));
@@ -414,34 +442,39 @@ bool PseudoFdInfo::InsertUploadPart(off_t start, off_t size, int part_num, bool 
 // This method only launches the upload thread.
 // Check the maximum number of threads before calling.
 //
-bool PseudoFdInfo::ParallelMultipartUpload(const char* path, const mp_part_list_t& mplist, bool is_copy, AutoLock::Type type)
+bool PseudoFdInfo::ParallelMultipartUpload(const char* path, const mp_part_list_t& mplist, bool is_copy)
 {
     //S3FS_PRN_DBG("[path=%s][mplist(%zu)]", SAFESTRPTR(path), mplist.size());
-
-    AutoLock auto_lock(&upload_list_lock, type);
 
     if(mplist.empty()){
         // nothing to do
         return true;
     }
-    if(!OpenUploadFd(AutoLock::ALREADY_LOCKED)){
+    if(!OpenUploadFd()){
         return false;
     }
 
-    for(mp_part_list_t::const_iterator iter = mplist.begin(); iter != mplist.end(); ++iter){
+    // Get upload id/fd before loop
+    std::string tmp_upload_id;
+    int         tmp_upload_fd = -1;
+    if(!GetUploadInfo(tmp_upload_id, tmp_upload_fd)){
+        return false;
+    }
+
+    for(auto iter = mplist.cbegin(); iter != mplist.cend(); ++iter){
         // Insert upload part
         etagpair* petag = nullptr;
-        if(!InsertUploadPart(iter->start, iter->size, iter->part_num, is_copy, &petag, AutoLock::ALREADY_LOCKED)){
+        if(!InsertUploadPart(iter->start, iter->size, iter->part_num, is_copy, &petag)){
             S3FS_PRN_ERR("Failed to insert insert upload part(path=%s, start=%lld, size=%lld, part=%d, copy=%s) to mplist", SAFESTRPTR(path), static_cast<long long int>(iter->start), static_cast<long long int>(iter->size), iter->part_num, (is_copy ? "true" : "false"));
             return false;
         }
 
         // make parameter for my thread
-        pseudofdinfo_thparam* thargs = new pseudofdinfo_thparam;
+        auto* thargs = new pseudofdinfo_mpupload_thparam;
         thargs->ppseudofdinfo        = this;
         thargs->path                 = SAFESTRPTR(path);
-        thargs->upload_id            = upload_id;
-        thargs->upload_fd            = upload_fd;
+        thargs->upload_id            = tmp_upload_id;
+        thargs->upload_fd            = tmp_upload_fd;
         thargs->start                = iter->start;
         thargs->size                 = iter->size;
         thargs->is_copy              = is_copy;
@@ -449,19 +482,19 @@ bool PseudoFdInfo::ParallelMultipartUpload(const char* path, const mp_part_list_
         thargs->petag                = petag;
 
         // make parameter for thread pool
-        thpoolman_param* ppoolparam  = new thpoolman_param;
-        ppoolparam->args             = thargs;
-        ppoolparam->psem             = &uploaded_sem;
-        ppoolparam->pfunc            = PseudoFdInfo::MultipartUploadThreadWorker;
+        thpoolman_param ppoolparam;
+        ppoolparam.args             = thargs;
+        ppoolparam.psem             = &uploaded_sem;
+        ppoolparam.pfunc            = PseudoFdInfo::MultipartUploadThreadWorker;
 
         // setup instruction
         if(!ThreadPoolMan::Instruct(ppoolparam)){
             S3FS_PRN_ERR("failed setup instruction for uploading.");
-            delete ppoolparam;
             delete thargs;
             return false;
         }
-        ++instruct_count;
+
+        IncreaseInstructionCount();
     }
     return true;
 }
@@ -472,17 +505,40 @@ bool PseudoFdInfo::ParallelMultipartUploadAll(const char* path, const mp_part_li
 
     result = 0;
 
-    if(!OpenUploadFd(AutoLock::NONE)){
+    if(!OpenUploadFd()){
         return false;
     }
-
-    if(!ParallelMultipartUpload(path, to_upload_list, false, AutoLock::NONE) || !ParallelMultipartUpload(path, copy_list, true, AutoLock::NONE)){
+    if(!ParallelMultipartUpload(path, to_upload_list, false) || !ParallelMultipartUpload(path, copy_list, true)){
         S3FS_PRN_ERR("Failed setup instruction for uploading(path=%s, to_upload_list=%zu, copy_list=%zu).", SAFESTRPTR(path), to_upload_list.size(), copy_list.size());
         return false;
     }
 
     // Wait for all thread exiting
     result = WaitAllThreadsExit();
+
+    return true;
+}
+
+//
+// Common method that calls S3fsCurl::PreMultipartUploadRequest via pre_multipart_upload_request
+//
+// [NOTE]
+// If the request is successful, initialize upload_id.
+//
+bool PseudoFdInfo::PreMultipartUploadRequest(const std::string& strpath, const headers_t& meta)
+{
+    // get upload_id
+    std::string new_upload_id;
+    if(0 != pre_multipart_upload_request(strpath, meta, new_upload_id)){
+        return false;
+    }
+
+    // reset upload_id
+    if(!RowInitialUploadInfo(new_upload_id, false/* not need to cancel */)){
+        S3FS_PRN_ERR("failed to setup multipart upload(set upload id to object)");
+        return false;
+    }
+    S3FS_PRN_DBG("succeed to setup multipart upload(set upload id to object)");
 
     return true;
 }
@@ -512,7 +568,6 @@ ssize_t PseudoFdInfo::UploadBoundaryLastUntreatedArea(const char* path, headers_
         S3FS_PRN_ERR("pseudo_fd(%d) to physical_fd(%d) for path(%s) is not opened or not writable, or pfdent is nullptr.", pseudo_fd, physical_fd, path);
         return -EBADF;
     }
-    AutoLock auto_lock(&upload_list_lock);
 
     //
     // Get last update untreated area
@@ -570,18 +625,9 @@ ssize_t PseudoFdInfo::UploadBoundaryLastUntreatedArea(const char* path, headers_
     // Has multipart uploading already started?
     //
     if(!IsUploading()){
-        // Multipart uploading hasn't started yet, so start it.
-        //
-        S3fsCurl    s3fscurl(true);
-        std::string tmp_upload_id;
-        int         result;
-        if(0 != (result = s3fscurl.PreMultipartPostRequest(path, meta, tmp_upload_id, true))){
-            S3FS_PRN_ERR("failed to setup multipart upload(create upload id) by errno(%d)", result);
-            return result;
-        }
-        if(!RowInitialUploadInfo(tmp_upload_id, false/* not need to cancel */, AutoLock::ALREADY_LOCKED)){
-            S3FS_PRN_ERR("failed to setup multipart upload(set upload id to object)");
-            return result;
+        std::string strpath = SAFESTRPTR(path);
+        if(!PreMultipartUploadRequest(strpath, meta)){
+            return -EIO;
         }
     }
 
@@ -591,7 +637,7 @@ ssize_t PseudoFdInfo::UploadBoundaryLastUntreatedArea(const char* path, headers_
     // When canceling(overwriting) a part that has already been uploaded, output it.
     //
     if(S3fsLog::IsS3fsLogDbg()){
-        for(filepart_list_t::const_iterator cancel_iter = cancel_uploaded_list.begin(); cancel_iter != cancel_uploaded_list.end(); ++cancel_iter){
+        for(auto cancel_iter = cancel_uploaded_list.cbegin(); cancel_iter != cancel_uploaded_list.cend(); ++cancel_iter){
             S3FS_PRN_DBG("Cancel uploaded: start(%lld), size(%lld), part number(%d)", static_cast<long long int>(cancel_iter->startpos), static_cast<long long int>(cancel_iter->size), (cancel_iter->petag ? cancel_iter->petag->part_num : -1));
         }
     }
@@ -599,7 +645,7 @@ ssize_t PseudoFdInfo::UploadBoundaryLastUntreatedArea(const char* path, headers_
     //
     // Upload Multipart parts
     //
-    if(!ParallelMultipartUpload(path, to_upload_list, false, AutoLock::ALREADY_LOCKED)){
+    if(!ParallelMultipartUpload(path, to_upload_list, false)){
         S3FS_PRN_ERR("Failed to upload multipart parts.");
         return -EIO;
     }
@@ -622,7 +668,7 @@ int PseudoFdInfo::WaitAllThreadsExit()
     int  result;
     bool is_loop = true;
     {
-        AutoLock auto_lock(&upload_list_lock);
+        const std::lock_guard<std::mutex> lock(upload_list_lock);
         if(0 == instruct_count && 0 == completed_count){
             result  = last_result;
             is_loop = false;
@@ -631,9 +677,9 @@ int PseudoFdInfo::WaitAllThreadsExit()
 
     while(is_loop){
         // need to wait the worker exiting
-        uploaded_sem.wait();
+        uploaded_sem.acquire();
         {
-            AutoLock auto_lock(&upload_list_lock);
+            const std::lock_guard<std::mutex> lock(upload_list_lock);
             if(0 < completed_count){
                 --completed_count;
             }
@@ -652,7 +698,7 @@ bool PseudoFdInfo::CancelAllThreads()
 {
     bool need_cancel = false;
     {
-        AutoLock auto_lock(&upload_list_lock);
+        const std::lock_guard<std::mutex> lock(upload_list_lock);
         if(0 < instruct_count && 0 < completed_count){
             S3FS_PRN_INFO("The upload thread is running, so cancel them and wait for the end.");
             need_cancel = true;
@@ -684,14 +730,14 @@ bool PseudoFdInfo::CancelAllThreads()
 // [NOTE]
 // Maximum multipart upload size must be uploading boundary.
 //
-bool PseudoFdInfo::ExtractUploadPartsFromUntreatedArea(off_t& untreated_start, off_t& untreated_size, mp_part_list_t& to_upload_list, filepart_list_t& cancel_upload_list, off_t max_mp_size)
+bool PseudoFdInfo::ExtractUploadPartsFromUntreatedArea(off_t untreated_start, off_t untreated_size, mp_part_list_t& to_upload_list, filepart_list_t& cancel_upload_list, off_t max_mp_size)
 {
     if(untreated_start < 0 || untreated_size <= 0){
-        S3FS_PRN_ERR("Paramters are wrong(untreated_start=%lld, untreated_size=%lld).", static_cast<long long int>(untreated_start), static_cast<long long int>(untreated_size));
+        S3FS_PRN_ERR("Parameters are wrong(untreated_start=%lld, untreated_size=%lld).", static_cast<long long int>(untreated_start), static_cast<long long int>(untreated_size));
         return false;
     }
 
-    // Initiliaze lists
+    // Initialize lists
     to_upload_list.clear();
     cancel_upload_list.clear();
 
@@ -717,28 +763,32 @@ bool PseudoFdInfo::ExtractUploadPartsFromUntreatedArea(off_t& untreated_start, o
     // Also, it is assumed that it must not be a copy area.
     // So if the areas overlap, include uploaded area as an untreated area.
     //
-    for(filepart_list_t::iterator cur_iter = upload_list.begin(); cur_iter != upload_list.end(); /* ++cur_iter */){
-        // Check overlap
-        if((cur_iter->startpos + cur_iter->size - 1) < aligned_start || (aligned_start + aligned_size - 1) < cur_iter->startpos){
-            // Areas do not overlap
-            ++cur_iter;
+    {
+        const std::lock_guard<std::mutex> lock(upload_list_lock);
 
-        }else{
-            // The areas overlap
-            //
-            // Since the start position of the uploaded area is aligned with the boundary,
-            // it is not necessary to check the start position.
-            // If the uploaded area exceeds the untreated area, expand the untreated area.
-            //
-            if((aligned_start + aligned_size - 1) < (cur_iter->startpos + cur_iter->size - 1)){
-                aligned_size += (cur_iter->startpos + cur_iter->size) - (aligned_start + aligned_size);
+        for(auto cur_iter = upload_list.begin(); cur_iter != upload_list.end(); /* ++cur_iter */){
+            // Check overlap
+            if((cur_iter->startpos + cur_iter->size - 1) < aligned_start || (aligned_start + aligned_size - 1) < cur_iter->startpos){
+                // Areas do not overlap
+                ++cur_iter;
+
+            }else{
+                // The areas overlap
+                //
+                // Since the start position of the uploaded area is aligned with the boundary,
+                // it is not necessary to check the start position.
+                // If the uploaded area exceeds the untreated area, expand the untreated area.
+                //
+                if((aligned_start + aligned_size - 1) < (cur_iter->startpos + cur_iter->size - 1)){
+                    aligned_size += (cur_iter->startpos + cur_iter->size) - (aligned_start + aligned_size);
+                }
+
+                //
+                // Add this to cancel list
+                //
+                cancel_upload_list.push_back(*cur_iter);            // Copy and Push to cancel list
+                cur_iter = upload_list.erase(cur_iter);
             }
-
-            //
-            // Add this to cancel list
-            //
-            cancel_upload_list.push_back(*cur_iter);            // Copy and Push to cancel list
-            cur_iter = upload_list.erase(cur_iter);
         }
     }
 
@@ -763,7 +813,8 @@ bool PseudoFdInfo::ExtractUploadPartsFromUntreatedArea(off_t& untreated_start, o
 // to_upload_list       : A list of areas to upload in multipart upload.
 // to_copy_list         : A list of areas for copy upload in multipart upload.
 // to_download_list     : A list of areas that must be downloaded before multipart upload.
-// cancel_upload_list : A list of areas that have already been uploaded and will be canceled(overwritten).
+// cancel_upload_list   : A list of areas that have already been uploaded and will be canceled(overwritten).
+// wait_upload_complete : If cancellation areas exist, this flag is set to true when it is necessary to wait until the upload of those cancellation areas is complete.
 // file_size            : The size of the upload file.
 // use_copy             : Specify true if copy multipart upload is available.
 //
@@ -771,23 +822,24 @@ bool PseudoFdInfo::ExtractUploadPartsFromUntreatedArea(off_t& untreated_start, o
 // The untreated_list in fdentity does not change, but upload_list is changed.
 // (If you want to restore it, you can use cancel_upload_list.)
 //
-bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list, mp_part_list_t& to_upload_list, mp_part_list_t& to_copy_list, mp_part_list_t& to_download_list, filepart_list_t& cancel_upload_list, off_t max_mp_size, off_t file_size, bool use_copy)
+bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list, mp_part_list_t& to_upload_list, mp_part_list_t& to_copy_list, mp_part_list_t& to_download_list, filepart_list_t& cancel_upload_list, bool& wait_upload_complete, off_t max_mp_size, off_t file_size, bool use_copy)
 {
-    AutoLock auto_lock(&upload_list_lock);
+    const std::lock_guard<std::mutex> lock(upload_list_lock);
 
-    // Initiliaze lists
+    // Initialize lists
     to_upload_list.clear();
     to_copy_list.clear();
     to_download_list.clear();
     cancel_upload_list.clear();
+    wait_upload_complete = false;
 
     // Duplicate untreated list
     untreated_list_t dup_untreated_list;
     untreated_list.Duplicate(dup_untreated_list);
 
     // Initialize the iterator of each list first
-    untreated_list_t::iterator dup_untreated_iter = dup_untreated_list.begin();
-    filepart_list_t::iterator  uploaded_iter      = upload_list.begin();
+    auto dup_untreated_iter = dup_untreated_list.begin();
+    auto uploaded_iter      = upload_list.begin();
 
     //
     // Loop to extract areas to upload and download
@@ -842,13 +894,13 @@ bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list,
                     // The untreated area exceeds the end of the current area
                     //
 
-                    // Ajust untreated area
+                    // Adjust untreated area
                     tmp_untreated_size  = (cur_start + cur_size) - tmp_untreated_start;
 
-                    // Add ajusted untreated area to cur_untreated_list
+                    // Add adjusted untreated area to cur_untreated_list
                     cur_untreated_list.emplace_back(tmp_untreated_start, tmp_untreated_size);
 
-                    // Remove this ajusted untreated area from the area pointed
+                    // Remove this adjusted untreated area from the area pointed
                     // to by dup_untreated_iter.
                     dup_untreated_iter->size  = (dup_untreated_iter->start + dup_untreated_iter->size) - (cur_start + cur_size);
                     dup_untreated_iter->start = tmp_untreated_start + tmp_untreated_size;
@@ -870,7 +922,7 @@ bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list,
         // It also assumes that each size of uploaded area must be a maximum upload
         // size.
         //
-        filepart_list_t::iterator overlap_uploaded_iter = upload_list.end();
+        auto overlap_uploaded_iter = upload_list.end();
         for(; uploaded_iter != upload_list.end(); ++uploaded_iter){
             if((cur_start < (uploaded_iter->startpos + uploaded_iter->size)) && (uploaded_iter->startpos < (cur_start + cur_size))){
                 if(overlap_uploaded_iter != upload_list.end()){
@@ -939,6 +991,11 @@ bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list,
                 // So this current area only needs to be uploaded again.
                 //
                 S3FS_PRN_DBG("Cancel upload: start=%lld, size=%lld", static_cast<long long int>(overlap_uploaded_iter->startpos), static_cast<long long int>(overlap_uploaded_iter->size));
+
+                if(!overlap_uploaded_iter->uploaded){
+                    S3FS_PRN_DBG("This cancel upload area is still uploading, so you must wait for it to complete before starting any Stream uploads.");
+                    wait_upload_complete = true;
+                }
                 cancel_upload_list.push_back(*overlap_uploaded_iter);               // add this uploaded area to cancel_upload_list
                 uploaded_iter = upload_list.erase(overlap_uploaded_iter);           // remove it from upload_list
 
@@ -966,7 +1023,7 @@ bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list,
                 off_t changed_start = cur_start;
                 off_t changed_size  = cur_size;
                 bool  first_area    = true;
-                for(untreated_list_t::const_iterator tmp_cur_untreated_iter = cur_untreated_list.begin(); tmp_cur_untreated_iter != cur_untreated_list.end(); ++tmp_cur_untreated_iter, first_area = false){
+                for(auto tmp_cur_untreated_iter = cur_untreated_list.cbegin(); tmp_cur_untreated_iter != cur_untreated_list.cend(); ++tmp_cur_untreated_iter, first_area = false){
                     if(tmp_cur_start < tmp_cur_untreated_iter->start){
                         //
                         // Detected a gap at the start of area
@@ -982,14 +1039,14 @@ bool PseudoFdInfo::ExtractUploadPartsFromAllArea(UntreatedParts& untreated_list,
                             // within 5GB and the remaining area after unification is
                             // larger than the minimum multipart upload size.
                             //
-                            mp_part_list_t::reverse_iterator copy_riter = to_copy_list.rbegin();
+                            auto copy_riter = to_copy_list.rbegin();
 
                             if( (copy_riter->start + copy_riter->size) == tmp_cur_start &&
                                 (copy_riter->size + (tmp_cur_untreated_iter->start - tmp_cur_start)) <= FIVE_GB &&
                                 ((tmp_cur_start + tmp_cur_size) - tmp_cur_untreated_iter->start) >= MIN_MULTIPART_SIZE )
                             {
                                 //
-                                // Unify to this area to previouse copy area.
+                                // Unify to this area to previous copy area.
                                 //
                                 copy_riter->size += tmp_cur_untreated_iter->start - tmp_cur_start;
                                 S3FS_PRN_DBG("Resize to copy: start=%lld, size=%lld", static_cast<long long int>(copy_riter->start), static_cast<long long int>(copy_riter->size));

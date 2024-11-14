@@ -21,9 +21,13 @@
 #ifndef S3FS_THREADPOOLMAN_H_
 #define S3FS_THREADPOOLMAN_H_
 
+#include <atomic>
+#include <future>
 #include <list>
+#include <mutex>
 #include <vector>
 
+#include "common.h"
 #include "psemaphore.h"
 
 //------------------------------------------------
@@ -32,7 +36,7 @@
 //
 // Prototype function
 //
-typedef void* (*thpoolman_worker)(void*);               // same as start_routine for pthread_create function
+typedef void* (*thpoolman_worker)(void*);
 
 //
 // Parameter structure
@@ -44,16 +48,12 @@ typedef void* (*thpoolman_worker)(void*);               // same as start_routine
 //
 struct thpoolman_param
 {
-    void*            args;
-    Semaphore*       psem;
-    thpoolman_worker pfunc;
-
-    thpoolman_param() : args(nullptr), psem(nullptr), pfunc(nullptr) {}
+    void*            args = nullptr;
+    Semaphore*       psem = nullptr;
+    thpoolman_worker pfunc = nullptr;
 };
 
-typedef std::list<thpoolman_param*>  thpoolman_params_t;
-
-typedef std::vector<pthread_t> thread_list_t;
+typedef std::list<thpoolman_param> thpoolman_params_t;
 
 //------------------------------------------------
 // Class ThreadPoolMan
@@ -61,41 +61,38 @@ typedef std::vector<pthread_t> thread_list_t;
 class ThreadPoolMan
 {
     private:
-        static ThreadPoolMan* singleton;
+        static std::unique_ptr<ThreadPoolMan> singleton;
 
-        bool                  is_exit;
+        std::atomic<bool>     is_exit;
         Semaphore             thpoolman_sem;
 
-        bool                  is_lock_init;
-        pthread_mutex_t       thread_list_lock;
-        thread_list_t         thread_list;
-
-        thpoolman_params_t    instruction_list;
-
-        bool                  is_exit_flag_init;
-        mutable pthread_mutex_t thread_exit_flag_lock;
+        std::mutex            thread_list_lock;
+        std::vector<std::pair<std::thread, std::future<int>>> thread_list GUARDED_BY(thread_list_lock);
+        thpoolman_params_t    instruction_list GUARDED_BY(thread_list_lock);
 
     private:
-        static void* Worker(void* arg);
+        static void Worker(ThreadPoolMan* psingleton, std::promise<int> promise);
 
         explicit ThreadPoolMan(int count = 1);
-        ~ThreadPoolMan();
-        ThreadPoolMan(const ThreadPoolMan&) = delete;
-        ThreadPoolMan(ThreadPoolMan&&) = delete;
-        ThreadPoolMan& operator=(const ThreadPoolMan&) = delete;
-        ThreadPoolMan& operator=(ThreadPoolMan&&) = delete;
 
         bool IsExit() const;
         void SetExitFlag(bool exit_flag);
 
         bool StopThreads();
         bool StartThreads(int count);
-        bool SetInstruction(thpoolman_param* pparam);
+        void SetInstruction(const thpoolman_param& pparam);
 
     public:
+        ~ThreadPoolMan();
+        ThreadPoolMan(const ThreadPoolMan&) = delete;
+        ThreadPoolMan(ThreadPoolMan&&) = delete;
+        ThreadPoolMan& operator=(const ThreadPoolMan&) = delete;
+        ThreadPoolMan& operator=(ThreadPoolMan&&) = delete;
+
         static bool Initialize(int count);
         static void Destroy();
-        static bool Instruct(thpoolman_param* pparam);
+        static bool Instruct(const thpoolman_param& pparam);
+        static bool AwaitInstruct(const thpoolman_param& param);
 };
 
 #endif // S3FS_THREADPOOLMAN_H_

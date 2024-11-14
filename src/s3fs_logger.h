@@ -22,6 +22,7 @@
 #define S3FS_LOGGER_H_
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <syslog.h>
@@ -42,7 +43,7 @@
 class S3fsLog
 {
     public:
-        enum s3fs_log_level{
+        enum s3fs_log_level : uint8_t {
             LEVEL_CRIT = 0,          // LEVEL_CRIT
             LEVEL_ERR  = 1,          // LEVEL_ERR
             LEVEL_WARN = 3,          // LEVEL_WARNING
@@ -51,15 +52,15 @@ class S3fsLog
         };
 
     protected:
-        static const int         NEST_MAX = 4;
-        static const char* const nest_spaces[NEST_MAX];
-        static const char        LOGFILEENV[];
-        static const char        MSGTIMESTAMP[];
+        static constexpr int         NEST_MAX = 4;
+        static constexpr const char* nest_spaces[NEST_MAX] = {"", "  ", "    ", "      "};
+        static constexpr char        LOGFILEENV[] = "S3FS_LOGFILE";
+        static constexpr char        MSGTIMESTAMP[] = "S3FS_MSGTIMESTAMP";
 
         static S3fsLog*       pSingleton;
         static s3fs_log_level debug_level;
         static FILE*          logfp;
-        static std::string*   plogfile;
+        static std::string    logfile;
         static bool           time_stamp;
 
     protected:
@@ -76,7 +77,7 @@ class S3fsLog
         static bool IsS3fsLogInfo()  { return IsS3fsLogLevel(LEVEL_INFO); }
         static bool IsS3fsLogDbg()   { return IsS3fsLogLevel(LEVEL_DBG);  }
 
-        static int GetSyslogLevel(s3fs_log_level level)
+        static constexpr int GetSyslogLevel(s3fs_log_level level)
         {
             return ( LEVEL_DBG  == (level & LEVEL_DBG) ? LOG_DEBUG   :
                      LEVEL_INFO == (level & LEVEL_DBG) ? LOG_INFO    :
@@ -86,7 +87,7 @@ class S3fsLog
 
         static std::string GetCurrentTime();
 
-        static const char* GetLevelString(s3fs_log_level level)
+        static constexpr const char* GetLevelString(s3fs_log_level level)
         {
             return ( LEVEL_DBG  == (level & LEVEL_DBG) ? "[DBG] " :
                      LEVEL_INFO == (level & LEVEL_DBG) ? "[INF] " :
@@ -94,13 +95,9 @@ class S3fsLog
                      LEVEL_ERR  == (level & LEVEL_DBG) ? "[ERR] " : "[CRT] " );
         }
 
-        static const char* GetS3fsLogNest(int nest)
+        static constexpr const char* GetS3fsLogNest(int nest)
         {
-            if(nest < NEST_MAX){
-                return nest_spaces[nest];
-            }else{
-                return nest_spaces[NEST_MAX - 1];
-            }
+            return nest_spaces[nest < NEST_MAX ? nest : NEST_MAX - 1];
         }
 
         static bool IsSetLogFile()

@@ -18,15 +18,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <pthread.h>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include <syslog.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <string.h>
 #include <gcrypt.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
@@ -50,7 +49,7 @@
 
 const char* s3fs_crypt_lib_name(void)
 {
-    static const char version[] = "GnuTLS(nettle)";
+    static constexpr char version[] = "GnuTLS(nettle)";
 
     return version;
 }
@@ -59,7 +58,7 @@ const char* s3fs_crypt_lib_name(void)
 
 const char* s3fs_crypt_lib_name()
 {
-    static const char version[] = "GnuTLS(gcrypt)";
+    static constexpr char version[] = "GnuTLS(gcrypt)";
 
     return version;
 }
@@ -206,10 +205,9 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
     md5_init(&ctx_md5);
 
     for(off_t total = 0; total < size; total += bytes){
-        off_t len = 512;
-        unsigned char buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
@@ -218,7 +216,7 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
             S3FS_PRN_ERR("file read error(%d)", errno);
             return false;
         }
-        md5_update(&ctx_md5, bytes, buf);
+        md5_update(&ctx_md5, bytes, reinterpret_cast<const uint8_t*>(buf.data()));
     }
     md5_digest(&ctx_md5, result->size(), result->data());
 
@@ -261,10 +259,9 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
     }
 
     for(off_t total = 0; total < size; total += bytes){
-        off_t len = 512;
-        char buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
@@ -274,7 +271,7 @@ bool s3fs_md5_fd(int fd, off_t start, off_t size, md5_t* result)
             gcry_md_close(ctx_md5);
             return false;
         }
-        gcry_md_write(ctx_md5, buf, bytes);
+        gcry_md_write(ctx_md5, buf.data(), bytes);
     }
     memcpy(result->data(), gcry_md_read(ctx_md5, 0), result->size());
     gcry_md_close(ctx_md5);
@@ -306,10 +303,9 @@ bool s3fs_sha256_fd(int fd, off_t start, off_t size, sha256_t* result)
     sha256_init(&ctx_sha256);
 
     for(off_t total = 0; total < size; total += bytes){
-        off_t len = 512;
-        unsigned char buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
@@ -318,7 +314,7 @@ bool s3fs_sha256_fd(int fd, off_t start, off_t size, sha256_t* result)
             S3FS_PRN_ERR("file read error(%d)", errno);
             return false;
         }
-        sha256_update(&ctx_sha256, bytes, buf);
+        sha256_update(&ctx_sha256, bytes, reinterpret_cast<const uint8_t*>(buf.data()));
     }
     sha256_digest(&ctx_sha256, result->size(), result->data());
 
@@ -362,10 +358,9 @@ bool s3fs_sha256_fd(int fd, off_t start, off_t size, sha256_t* result)
     }
 
     for(off_t total = 0; total < size; total += bytes){
-        off_t len = 512;
-        char buf[len];
-        bytes = len < (size - total) ? len : (size - total);
-        bytes = pread(fd, buf, bytes, start + total);
+        std::array<char, 512> buf;
+        bytes = std::min(static_cast<off_t>(buf.size()), (size - total));
+        bytes = pread(fd, buf.data(), bytes, start + total);
         if(0 == bytes){
             // end of file
             break;
@@ -375,7 +370,7 @@ bool s3fs_sha256_fd(int fd, off_t start, off_t size, sha256_t* result)
             gcry_md_close(ctx_sha256);
             return false;
         }
-        gcry_md_write(ctx_sha256, buf, bytes);
+        gcry_md_write(ctx_sha256, buf.data(), bytes);
     }
     memcpy(result->data(), gcry_md_read(ctx_sha256, 0), result->size());
     gcry_md_close(ctx_sha256);

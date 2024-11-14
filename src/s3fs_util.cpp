@@ -24,6 +24,7 @@
 #include <cerrno>
 #include <grp.h>
 #include <memory>
+#include <mutex>
 #include <pwd.h>
 #include <libgen.h>
 #include <dirent.h>
@@ -37,7 +38,6 @@
 #include "s3fs_util.h"
 #include "string_util.h"
 #include "s3fs_help.h"
-#include "autolock.h"
 
 //-------------------------------------------------------------------
 // Global variables
@@ -66,20 +66,22 @@ void init_sysconf_vars()
     // there is no hard limit on the size of the buffer needed to
     // store all the groups returned.
 
+    errno = 0;
     long res = sysconf(_SC_GETPW_R_SIZE_MAX);
     if(0 > res){
         if (errno != 0){
-            S3FS_PRN_WARN("could not get max pw length.");
+            S3FS_PRN_ERR("could not get max password length.");
             abort();
         }
         res = 1024; // default initial length
     }
     max_password_size = res;
 
+    errno = 0;
     res = sysconf(_SC_GETGR_R_SIZE_MAX);
     if(0 > res) {
         if (errno != 0) {
-            S3FS_PRN_ERR("could not get max name length.");
+            S3FS_PRN_ERR("could not get max group name length.");
             abort();
         }
         res = 1024; // default initial length
@@ -167,52 +169,11 @@ int is_uid_include_group(uid_t uid, gid_t gid)
 // conflicts.
 // To avoid this, exclusive control is performed by mutex.
 //
-static pthread_mutex_t* pbasename_lock = nullptr;
-
-bool init_basename_lock()
-{
-    if(pbasename_lock){
-        S3FS_PRN_ERR("already initialized mutex for posix dirname/basename function.");
-        return false;
-    }
-    pbasename_lock = new pthread_mutex_t;
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-    int result;
-    if(0 != (result = pthread_mutex_init(pbasename_lock, &attr))){
-        S3FS_PRN_ERR("failed to init pbasename_lock: %d.", result);
-        delete pbasename_lock;
-        pbasename_lock = nullptr;
-        return false;
-    }
-    return true;
-}
-
-bool destroy_basename_lock()
-{
-    if(!pbasename_lock){
-        S3FS_PRN_ERR("the mutex for posix dirname/basename function is not initialized.");
-        return false;
-    }
-    int result;
-    if(0 != (result = pthread_mutex_destroy(pbasename_lock))){
-        S3FS_PRN_ERR("failed to destroy pbasename_lock: %d", result);
-        return false;
-    }
-    delete pbasename_lock;
-    pbasename_lock = nullptr;
-
-    return true;
-}
+static std::mutex basename_lock;
 
 std::string mydirname(const std::string& path)
 {
-    AutoLock auto_lock(pbasename_lock);
+    const std::lock_guard<std::mutex> lock(basename_lock);
 
     return mydirname(path.c_str());
 }
@@ -233,7 +194,7 @@ std::string mydirname(const char* path)
 
 std::string mybasename(const std::string& path)
 {
-    AutoLock auto_lock(pbasename_lock);
+    const std::lock_guard<std::mutex> data_lock(basename_lock);
 
     return mybasename(path.c_str());
 }
@@ -400,7 +361,7 @@ bool compare_sysname(const char* target)
     // The buffer size of sysname member in struct utsname is
     // OS dependent, but 512 bytes is sufficient for now.
     //
-    static char* psysname = nullptr;
+    static const char* psysname = nullptr;
     static char  sysname[512];
     if(!psysname){
         struct utsname sysinfo;
@@ -443,11 +404,6 @@ void print_launch_message(int argc, char** argv)
     }
     S3FS_PRN_LAUNCH_INFO("%s", message.c_str());
 }
-
-//-------------------------------------------------------------------
-// Utility for nanosecond time(timespec)
-//-------------------------------------------------------------------
-const struct timespec S3FS_OMIT_TS = {0, UTIME_OMIT};
 
 //
 // result: -1  ts1 <  ts2

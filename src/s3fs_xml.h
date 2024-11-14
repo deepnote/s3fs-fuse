@@ -22,6 +22,7 @@
 #define S3FS_S3FS_XML_H_
 
 #include <libxml/xpath.h>
+#include <libxml/parser.h>  // [NOTE] nessetially include this header in some environments
 #include <memory>
 #include <string>
 
@@ -45,9 +46,6 @@ unique_ptr_xmlChar get_next_marker(xmlDocPtr doc);
 bool get_incomp_mpu_list(xmlDocPtr doc, incomp_mpu_list_t& list);
 
 bool simple_parse_xml(const char* data, size_t len, const char* key, std::string& value);
-
-bool init_parser_xml_lock();
-bool destroy_parser_xml_lock();
 
 #endif // S3FS_S3FS_XML_H_
 

@@ -20,11 +20,10 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <mutex>
 #include <vector>
 
-#include "s3fs_logger.h"
 #include "fdcache_pseudofd.h"
-#include "autolock.h"
 
 //------------------------------------------------
 // Symbols
@@ -33,7 +32,7 @@
 // The minimum pseudo fd value starts 2.
 // This is to avoid mistakes for 0(stdout) and 1(stderr), which are usually used.
 //
-static const int MIN_PSEUDOFD_NUMBER = 2;
+static constexpr int MIN_PSEUDOFD_NUMBER = 2;
 
 //------------------------------------------------
 // PseudoFdManager class methods
@@ -57,39 +56,12 @@ bool PseudoFdManager::Release(int fd)
 //------------------------------------------------
 // PseudoFdManager methods
 //------------------------------------------------
-PseudoFdManager::PseudoFdManager() : is_lock_init(false)
-{
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-    int result;
-    if(0 != (result = pthread_mutex_init(&pseudofd_list_lock, &attr))){
-        S3FS_PRN_CRIT("failed to init pseudofd_list_lock: %d", result);
-        abort();
-    }
-    is_lock_init = true;
-}
-
-PseudoFdManager::~PseudoFdManager()
-{
-    if(is_lock_init){
-      int result;
-      if(0 != (result = pthread_mutex_destroy(&pseudofd_list_lock))){
-          S3FS_PRN_CRIT("failed to destroy pseudofd_list_lock: %d", result);
-          abort();
-      }
-      is_lock_init = false;
-    }
-}
-
 int PseudoFdManager::GetUnusedMinPseudoFd() const
 {
     int min_fd = MIN_PSEUDOFD_NUMBER;
 
     // Look for the first discontinuous value.
-    for(pseudofd_list_t::const_iterator iter = pseudofd_list.begin(); iter != pseudofd_list.end(); ++iter){
+    for(auto iter = pseudofd_list.cbegin(); iter != pseudofd_list.cend(); ++iter){
         if(min_fd == (*iter)){
             ++min_fd;
         }else if(min_fd < (*iter)){
@@ -101,7 +73,7 @@ int PseudoFdManager::GetUnusedMinPseudoFd() const
 
 int PseudoFdManager::CreatePseudoFd()
 {
-    AutoLock auto_lock(&pseudofd_list_lock);
+    const std::lock_guard<std::mutex> lock(pseudofd_list_lock);
 
     int new_fd = PseudoFdManager::GetUnusedMinPseudoFd();
     pseudofd_list.push_back(new_fd);
@@ -112,9 +84,9 @@ int PseudoFdManager::CreatePseudoFd()
 
 bool PseudoFdManager::ReleasePseudoFd(int fd)
 {
-    AutoLock auto_lock(&pseudofd_list_lock);
+    const std::lock_guard<std::mutex> lock(pseudofd_list_lock);
 
-    for(pseudofd_list_t::iterator iter = pseudofd_list.begin(); iter != pseudofd_list.end(); ++iter){
+    for(auto iter = pseudofd_list.begin(); iter != pseudofd_list.end(); ++iter){
         if(fd == (*iter)){
             pseudofd_list.erase(iter);
             return true;

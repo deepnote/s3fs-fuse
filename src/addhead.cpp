@@ -23,7 +23,9 @@
 #include <cstring>
 #include <sstream>
 #include <fstream>
+#include <string>
 #include <strings.h>
+#include <utility>
 #include <vector>
 
 #include "s3fs.h"
@@ -34,7 +36,7 @@
 //-------------------------------------------------------------------
 // Symbols
 //-------------------------------------------------------------------
-#define ADD_HEAD_REGEX              "reg:"
+static constexpr char ADD_HEAD_REGEX[] = "reg:";
 
 //-------------------------------------------------------------------
 // Class AdditionalHeader
@@ -119,7 +121,7 @@ bool AdditionalHeader::Load(const char* file)
             key.erase(0, strlen(ADD_HEAD_REGEX));
 
             // compile
-            std::unique_ptr<regex_t> preg(new regex_t);
+            RegexPtr preg(new regex_t, regfree);
             int       result;
             if(0 != (result = regcomp(preg.get(), key.c_str(), REG_EXTENDED | REG_NOSUB))){ // we do not need matching info
                 char    errbuf[256];
@@ -131,7 +133,7 @@ bool AdditionalHeader::Load(const char* file)
             addheadlist.emplace_back(std::move(preg), key, head, value);
         }else{
             // not regex, directly comparing
-            addheadlist.emplace_back(nullptr, key, head, value);
+            addheadlist.emplace_back(RegexPtr(nullptr, regfree), key, head, value);
         }
 
         // set flag
@@ -164,7 +166,7 @@ bool AdditionalHeader::AddHeader(headers_t& meta, const char* path) const
     // [NOTE]
     // Because to allow duplicate key, and then scanning the entire table.
     //
-    for(addheadlist_t::const_iterator iter = addheadlist.begin(); iter != addheadlist.end(); ++iter){
+    for(auto iter = addheadlist.cbegin(); iter != addheadlist.cend(); ++iter){
         const add_header *paddhead = &*iter;
 
         if(paddhead->pregex){
@@ -194,7 +196,7 @@ struct curl_slist* AdditionalHeader::AddHeader(struct curl_slist* list, const ch
     if(!AddHeader(meta, path)){
         return list;
     }
-    for(headers_t::iterator iter = meta.begin(); iter != meta.end(); ++iter){
+    for(auto iter = meta.cbegin(); iter != meta.cend(); ++iter){
         // Adding header
         list = curl_slist_sort_insert(list, iter->first.c_str(), iter->second.c_str());
     }
@@ -214,7 +216,7 @@ bool AdditionalHeader::Dump() const
 
     ssdbg << "Additional Header list[" << addheadlist.size() << "] = {" << std::endl;
 
-    for(addheadlist_t::const_iterator iter = addheadlist.begin(); iter != addheadlist.end(); ++iter, ++cnt){
+    for(auto iter = addheadlist.cbegin(); iter != addheadlist.cend(); ++iter, ++cnt){
         const add_header *paddhead = &*iter;
 
         ssdbg << "    [" << cnt << "] = {" << std::endl;

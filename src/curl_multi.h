@@ -21,8 +21,13 @@
 #ifndef S3FS_CURL_MULTI_H_
 #define S3FS_CURL_MULTI_H_
 
+#include <future>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
+
+#include "common.h"
 
 //----------------------------------------------
 // Typedef
@@ -44,6 +49,7 @@ class S3fsMultiCurl
 
         s3fscurllist_t clist_all;  // all of curl requests
         s3fscurllist_t clist_req;  // curl requests are sent
+        bool           not_abort;  // complete all requests without aborting on errors
 
         S3fsMultiSuccessCallback   SuccessCallback;
         S3fsMultiNotFoundCallback  NotFoundCallback;
@@ -51,19 +57,23 @@ class S3fsMultiCurl
         void*                      pSuccessCallbackParam;
         void*                      pNotFoundCallbackParam;
 
-        pthread_mutex_t completed_tids_lock;
-        std::vector<pthread_t> completed_tids;
+        std::mutex completed_tids_lock;
+        std::vector<std::thread::id> completed_tids GUARDED_BY(completed_tids_lock);
 
     private:
         bool ClearEx(bool is_all);
         int MultiPerform();
         int MultiRead();
 
-        static void* RequestPerformWrapper(void* arg);
+        static void RequestPerformWrapper(S3fsCurl* s3fscurl, std::promise<int> promise);
 
     public:
-        explicit S3fsMultiCurl(int maxParallelism);
+        explicit S3fsMultiCurl(int maxParallelism, bool not_abort = false);
         ~S3fsMultiCurl();
+        S3fsMultiCurl(const S3fsMultiCurl&) = delete;
+        S3fsMultiCurl(S3fsMultiCurl&&) = delete;
+        S3fsMultiCurl& operator=(const S3fsMultiCurl&) = delete;
+        S3fsMultiCurl& operator=(S3fsMultiCurl&&) = delete;
 
         int GetMaxParallelism() const { return maxParallelism; }
 
@@ -73,7 +83,7 @@ class S3fsMultiCurl
         void* SetSuccessCallbackParam(void* param);
         void* SetNotFoundCallbackParam(void* param);
         bool Clear() { return ClearEx(true); }
-        bool SetS3fsCurlObject(std::unique_ptr<S3fsCurl>&& s3fscurl);
+        bool SetS3fsCurlObject(std::unique_ptr<S3fsCurl> s3fscurl);
         int Request();
 };
 

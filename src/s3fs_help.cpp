@@ -29,7 +29,7 @@
 //-------------------------------------------------------------------
 // Contents
 //-------------------------------------------------------------------
-static const char help_string[] = 
+static constexpr char help_string[] =
     "\n"
     "Mount an Amazon S3 bucket as a file system.\n"
     "\n"
@@ -128,6 +128,8 @@ static const char help_string[] =
     "        environment which value is <kms id>. You must be careful\n"
     "        about that you can not use the KMS id which is not same EC2\n"
     "        region.\n"
+    "        Additionally, if you specify SSE-KMS, your endpoints must use\n"
+    "        Secure Sockets Layer(SSL) or Transport Layer Security(TLS).\n"
     "\n"
     "   load_sse_c - specify SSE-C keys\n"
     "        Specify the custom-provided encryption keys file path for decrypting\n"
@@ -215,6 +217,21 @@ static const char help_string[] =
     "   ssl_verify_hostname (default=\"2\")\n"
     "      - When 0, do not verify the SSL certificate against the hostname.\n"
     "\n"
+    "   ssl_client_cert (default=\"\")\n"
+    "      - Specify an SSL client certificate.\n"
+    "      Specify this optional parameter in the following format:\n"
+    "      \"<SSL Cert>[:<Cert Type>[:<Private Key>[:<Key Type>\n"
+    "                                                   [:<Password>]]]]\"\n"
+    "      <SSL Cert>:    Client certificate.\n"
+    "                     Specify the file path or NickName(for NSS, etc.).\n"
+    "      <Cert Type>:   Type of certificate, default is \"PEM\"(optional).\n"
+    "      <Private Key>: Certificate's private key file(optional).\n"
+    "      <Key Type>:    Type of private key, default is \"PEM\"(optional).\n"
+    "      <Password>:    Passphrase of the private key(optional).\n"
+    "                     It is also possible to omit this value and specify\n"
+    "                     it using the environment variable\n"
+    "                     \"S3FS_SSL_PRIVKEY_PASSWORD\".\n"
+    "\n"
     "   nodnscache (disable DNS cache)\n"
     "      - s3fs is always using DNS cache, this option make DNS cache disable.\n"
     "\n"
@@ -227,7 +244,7 @@ static const char help_string[] =
     "\n"
     "   parallel_count (default=\"5\")\n"
     "      - number of parallel request for uploading big objects.\n"
-    "      s3fs uploads large object (over 20MB) by multipart post request, \n"
+    "      s3fs uploads large object (over 20MB) by multipart upload request, \n"
     "      and sends parallel requests.\n"
     "      This option limits parallel request count which s3fs requests \n"
     "      at once. It is necessary to set this value depending on a CPU \n"
@@ -269,6 +286,15 @@ static const char help_string[] =
     "        downloading, uploading and caching files. If the disk free\n"
     "        space is smaller than this value, s3fs do not use disk space\n"
     "        as possible in exchange for the performance.\n"
+    "\n"
+    "   free_space_ratio (default=\"10\")\n"
+    "      - sets min free space ratio of the disk.\n"
+    "      The value of this option can be between 0 and 100. It will control\n"
+    "      the size of the cache according to this ratio to ensure that the\n"
+    "      idle ratio of the disk is greater than this value.\n"
+    "      For example, when the disk space is 50GB, the default value will\n"
+    "      ensure that the disk will reserve at least 50GB * 10%% = 5GB of\n"
+    "      remaining space.\n"
     "\n"
     "   multipart_threshold (default=\"25\")\n"
     "      - threshold, in MB, to use multipart upload instead of\n"
@@ -333,7 +359,7 @@ static const char help_string[] =
     "\n"
     "   max_thread_count (default is \"5\")\n"
     "      - Specifies the number of threads waiting for stream uploads.\n"
-    "      Note that this option and Streamm Upload are still experimental\n"
+    "      Note that this option and Stream Upload are still experimental\n"
     "      and subject to change in the future.\n"
     "      This option will be merged with \"parallel_count\" in the future.\n"
     "\n"
@@ -516,6 +542,14 @@ static const char help_string[] =
     "        Separate the username and passphrase with a ':' character and\n"
     "        specify each as a URL-encoded string.\n"
     "\n"
+    "   ipresolve (default=\"whatever\")\n"
+    "        Select what type of IP addresses to use when establishing a\n"
+    "        connection.\n"
+    "        Default('whatever') can use addresses of all IP versions(IPv4 and\n"
+    "        IPv6) that your system allows. If you specify 'IPv4', only IPv4\n"
+    "        addresses are used. And when 'IPv6'is specified, only IPv6 addresses\n"
+    "        will be used.\n"
+    "\n"
     "   logfile - specify the log output file.\n"
     "        s3fs outputs the log file to syslog. Alternatively, if s3fs is\n"
     "        started with the \"-f\" option specified, the log will be output\n"
@@ -619,7 +653,7 @@ void show_help()
 void show_version()
 {
     printf(
-    "Amazon Simple Storage Service File System V%s (commit:%s) with %s\n"
+    "Amazon Simple Storage Service File System V%s%s with %s\n"
     "Copyright (C) 2010 Randy Rizun <rrizun@gmail.com>\n"
     "License GPL2: GNU GPL version 2 <https://gnu.org/licenses/gpl.html>\n"
     "This is free software: you are free to change and redistribute it.\n"
@@ -629,7 +663,7 @@ void show_version()
 
 const char* short_version()
 {
-    static const char short_ver[] = "s3fs version " VERSION "(" COMMIT_HASH_VAL ")";
+    static constexpr char short_ver[] = "s3fs version " VERSION "" COMMIT_HASH_VAL;
     return short_ver;
 }
 

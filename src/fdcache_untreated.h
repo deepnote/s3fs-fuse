@@ -21,6 +21,8 @@
 #ifndef S3FS_FDCACHE_UNTREATED_H_
 #define S3FS_FDCACHE_UNTREATED_H_
 
+#include <mutex>
+
 #include "common.h"
 #include "types.h"
 
@@ -30,18 +32,17 @@
 class UntreatedParts
 {
     private:
-        mutable pthread_mutex_t untreated_list_lock;   // protects untreated_list
-        bool             is_lock_init;
+        mutable std::mutex untreated_list_lock;   // protects untreated_list
 
-        untreated_list_t untreated_list;
-        long             last_tag;              // [NOTE] Use this to identify the latest updated part.
+        untreated_list_t untreated_list GUARDED_BY(untreated_list_lock);
+        long             last_tag GUARDED_BY(untreated_list_lock) = 0;  // [NOTE] Use this to identify the latest updated part.
 
     private:
         bool RowGetPart(off_t& start, off_t& size, off_t max_size, off_t min_size, bool lastpart) const;
 
     public:
-        UntreatedParts();
-        ~UntreatedParts();
+        UntreatedParts() = default;
+        ~UntreatedParts() = default;
         UntreatedParts(const UntreatedParts&) = delete;
         UntreatedParts(UntreatedParts&&) = delete;
         UntreatedParts& operator=(const UntreatedParts&) = delete;

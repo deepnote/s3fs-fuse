@@ -21,6 +21,7 @@
 #ifndef S3FS_FDCACHE_PAGE_H_
 #define S3FS_FDCACHE_PAGE_H_
 
+#include <cstdint>
 #include <sys/types.h>
 #include <vector>
 
@@ -76,10 +77,10 @@ class PageList
 
     private:
         fdpage_list_t pages;
-        bool          is_shrink;    // [NOTE] true if it has been shrinked even once
+        bool          is_shrink;    // [NOTE] true if it has been shrunk even once
 
     public:
-        enum class page_status{
+        enum class page_status : int8_t {
             NOT_LOAD_MODIFIED = 0,
             LOADED,
             MODIFIED,
@@ -93,13 +94,16 @@ class PageList
 
         void Clear();
         bool Parse(off_t new_pos);
+        bool Serialize(CacheFileStat& file, ino_t inode);
 
     public:
         static void FreeList(fdpage_list_t& list);
 
-        explicit PageList(off_t size = 0, bool is_loaded = false, bool is_modified = false, bool shrinked = false);
+        explicit PageList(off_t size = 0, bool is_loaded = false, bool is_modified = false, bool shrunk = false);
         PageList(const PageList&) = delete;
+        PageList(PageList&&) = delete;
         PageList& operator=(const PageList&) = delete;
+        PageList& operator=(PageList&&) = delete;
         ~PageList();
 
         bool Init(off_t size, bool is_loaded, bool is_modified);
@@ -119,7 +123,7 @@ class PageList
         bool ClearAllModified();
 
         bool Compress();
-        bool Serialize(CacheFileStat& file, bool is_output, ino_t inode);
+        bool Deserialize(CacheFileStat& file, ino_t inode);
         void Dump() const;
         bool CompareSparseFile(int fd, size_t file_size, fdpage_list_t& err_area_list, fdpage_list_t& warn_area_list);
 };

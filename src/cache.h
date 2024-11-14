@@ -22,8 +22,13 @@
 #define S3FS_CACHE_H_
 
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <sys/stat.h>
+#include <vector>
 
-#include "autolock.h"
+#include "common.h"
 #include "metaheader.h"
 
 //-------------------------------------------------------------------
@@ -33,21 +38,13 @@
 // Struct for stats cache
 //
 struct stat_cache_entry {
-    struct stat       stbuf;
-    unsigned long     hit_count;
-    struct timespec   cache_date;
+    struct stat       stbuf = {};
+    unsigned long     hit_count = 0;
+    struct timespec   cache_date = {0, 0};
     headers_t         meta;
-    bool              isforce;
-    bool              noobjcache;  // Flag: cache is no object for no listing.
-    unsigned long     notruncate;  // 0<:   not remove automatically at checking truncate
-
-    stat_cache_entry() : hit_count(0), isforce(false), noobjcache(false), notruncate(0L)
-    {
-        memset(&stbuf, 0, sizeof(struct stat));
-        cache_date.tv_sec  = 0;
-        cache_date.tv_nsec = 0;
-        meta.clear();
-    }
+    bool              isforce = false;
+    bool              noobjcache = false;  // Flag: cache is no object for no listing.
+    unsigned long     notruncate = 0L;  // 0<:   not remove automatically at checking truncate
 };
 
 typedef std::map<std::string, stat_cache_entry> stat_cache_t; // key=path
@@ -57,17 +54,17 @@ typedef std::map<std::string, stat_cache_entry> stat_cache_t; // key=path
 //
 struct symlink_cache_entry {
     std::string       link;
-    unsigned long     hit_count;
-    struct timespec   cache_date;  // The function that operates timespec uses the same as Stats
-
-    symlink_cache_entry() : link(""), hit_count(0)
-    {
-      cache_date.tv_sec  = 0;
-      cache_date.tv_nsec = 0;
-    }
+    unsigned long     hit_count = 0;
+    struct timespec   cache_date = {0, 0};  // The function that operates timespec uses the same as Stats
 };
 
 typedef std::map<std::string, symlink_cache_entry> symlink_cache_t;
+
+//
+// Typedefs for No truncate file name cache
+//
+typedef std::vector<std::string> notruncate_filelist_t;                    // untruncated file name list in dir
+typedef std::map<std::string, notruncate_filelist_t> notruncate_dir_map_t; // key is parent dir path
 
 //-------------------------------------------------------------------
 // Class StatCache
@@ -85,27 +82,35 @@ class StatCache
 {
     private:
         static StatCache       singleton;
-        static pthread_mutex_t stat_cache_lock;
-        stat_cache_t           stat_cache;
+        static std::mutex      stat_cache_lock;
+        stat_cache_t           stat_cache GUARDED_BY(stat_cache_lock);
         bool                   IsExpireTime;
         bool                   IsExpireIntervalType;    // if this flag is true, cache data is updated at last access time.
         time_t                 ExpireTime;
         unsigned long          CacheSize;
         bool                   IsCacheNoObject;
-        symlink_cache_t        symlink_cache;
+        symlink_cache_t        symlink_cache GUARDED_BY(stat_cache_lock);
+        notruncate_dir_map_t   notruncate_file_cache GUARDED_BY(stat_cache_lock);
 
-    private:
         StatCache();
         ~StatCache();
 
         void Clear();
         bool GetStat(const std::string& key, struct stat* pst, headers_t* meta, bool overcheck, const char* petag, bool* pisforce);
         // Truncate stat cache
-        bool TruncateCache();
+        bool TruncateCache() REQUIRES(StatCache::stat_cache_lock);
         // Truncate symbolic link cache
-        bool TruncateSymlink();
+        bool TruncateSymlink() REQUIRES(StatCache::stat_cache_lock);
+
+        bool AddNotruncateCache(const std::string& key) REQUIRES(stat_cache_lock);
+        bool DelNotruncateCache(const std::string& key) REQUIRES(stat_cache_lock);
 
     public:
+        StatCache(const StatCache&) = delete;
+        StatCache(StatCache&&) = delete;
+        StatCache& operator=(const StatCache&) = delete;
+        StatCache& operator=(StatCache&&) = delete;
+
         // Reference singleton
         static StatCache* getStatCacheData()
         {
@@ -172,16 +177,24 @@ class StatCache
         void ChangeNoTruncateFlag(const std::string& key, bool no_truncate);
 
         // Delete stat cache
-        bool DelStat(const char* key, AutoLock::Type locktype = AutoLock::NONE);
-        bool DelStat(const std::string& key, AutoLock::Type locktype = AutoLock::NONE)
+        bool DelStat(const std::string& key)
         {
-            return DelStat(key.c_str(), locktype);
+            const std::lock_guard<std::mutex> lock(StatCache::stat_cache_lock);
+            return DelStatHasLock(key);
         }
+        bool DelStatHasLock(const std::string& key) REQUIRES(StatCache::stat_cache_lock);
 
         // Cache for symbolic link
         bool GetSymlink(const std::string& key, std::string& value);
         bool AddSymlink(const std::string& key, const std::string& value);
-        bool DelSymlink(const char* key, AutoLock::Type locktype = AutoLock::NONE);
+        bool DelSymlink(const std::string& key) {
+            const std::lock_guard<std::mutex> lock(StatCache::stat_cache_lock);
+            return DelSymlinkHasLock(key);
+        }
+        bool DelSymlinkHasLock(const std::string& key) REQUIRES(stat_cache_lock);
+
+        // Cache for Notruncate file
+        bool GetNotruncateCache(const std::string& parentdir, notruncate_filelist_t& list);
 };
 
 //-------------------------------------------------------------------

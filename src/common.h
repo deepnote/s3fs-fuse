@@ -21,17 +21,17 @@
 #ifndef S3FS_COMMON_H_
 #define S3FS_COMMON_H_
 
+#include <string>
 #include <sys/types.h>
 
 #include "../config.h"
-#include "types.h"
 
 //-------------------------------------------------------------------
 // Global variables
 //-------------------------------------------------------------------
 // TODO: namespace these
-static const int64_t  FIVE_GB            = 5LL * 1024LL * 1024LL * 1024LL;
-static const off_t    MIN_MULTIPART_SIZE = 5 * 1024 * 1024;
+static constexpr int64_t  FIVE_GB            = 5LL * 1024LL * 1024LL * 1024LL;
+static constexpr off_t    MIN_MULTIPART_SIZE = 5 * 1024 * 1024;
 
 extern bool           foreground;
 extern bool           nomultipart;
@@ -50,6 +50,36 @@ extern std::string    instance_name;
 // For weak attribute
 //-------------------------------------------------------------------
 #define	S3FS_FUNCATTR_WEAK __attribute__ ((weak,unused))
+
+//-------------------------------------------------------------------
+// For clang -Wthread-safety
+//-------------------------------------------------------------------
+#if defined(__clang__)
+#define THREAD_ANNOTATION_ATTRIBUTE(x)   __attribute__((x))
+#else
+#define THREAD_ANNOTATION_ATTRIBUTE(x)   // no-op
+#endif
+
+#define GUARDED_BY(x) \
+    THREAD_ANNOTATION_ATTRIBUTE(guarded_by(x))
+
+#define PT_GUARDED_BY(x) \
+    THREAD_ANNOTATION_ATTRIBUTE(pt_guarded_by(x))
+
+#define REQUIRES(...) \
+    THREAD_ANNOTATION_ATTRIBUTE(requires_capability(__VA_ARGS__))
+
+#define RETURN_CAPABILITY(...) \
+    THREAD_ANNOTATION_ATTRIBUTE(lock_returned(__VA_ARGS__))
+
+#define ACQUIRED_BEFORE(...) \
+    THREAD_ANNOTATION_ATTRIBUTE(acquired_before(__VA_ARGS__))
+
+#define ACQUIRED_AFTER(...) \
+    THREAD_ANNOTATION_ATTRIBUTE(acquired_after(__VA_ARGS__))
+
+#define NO_THREAD_SAFETY_ANALYSIS \
+    THREAD_ANNOTATION_ATTRIBUTE(no_thread_safety_analysis)
 
 #endif // S3FS_COMMON_H_
 

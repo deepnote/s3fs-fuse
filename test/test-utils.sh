@@ -125,20 +125,21 @@ function check_file_size() {
     local FILE_NAME="$1"
     local EXPECTED_SIZE="$2"
 
-    # Verify file is zero length via metadata
+    # Verify file length via metadata
     local size
     size=$(get_size "${FILE_NAME}")
     if [ "${size}" -ne "${EXPECTED_SIZE}" ]
     then
-        echo "error: expected ${FILE_NAME} to be zero length"
+        echo "error: expected ${FILE_NAME} to be ${EXPECTED_SIZE} length but was ${size} via metadata"
         return 1
     fi
 
-    # Verify file is zero length via data
-    size=$(wc -c < "${FILE_NAME}")
+    # Verify file length via data
+    # shellcheck disable=SC2002
+    size=$(cat "${FILE_NAME}" | wc -c)
     if [ "${size}" -ne "${EXPECTED_SIZE}" ]
     then
-        echo "error: expected ${FILE_NAME} to be ${EXPECTED_SIZE} length, got ${size}"
+        echo "error: expected ${FILE_NAME} to be ${EXPECTED_SIZE} length, got ${size} via data"
         return 1
     fi
 }
@@ -396,14 +397,74 @@ function make_random_string() {
     else
         local END_POS=8
     fi
-
-    "${BASE64_BIN}" --wrap=0 < /dev/urandom | tr -d /+ | head -c "${END_POS}"
+    if [ "$(uname)" = "Darwin" ]; then
+        local BASE64_OPT="--break=0"
+    else
+        local BASE64_OPT="--wrap=0"
+    fi
+    "${BASE64_BIN}" "${BASE64_OPT}" < /dev/urandom 2>/dev/null | tr -d /+ | head -c "${END_POS}"
 
     return 0
 }
 
 function s3fs_args() {
-    ps -o args -p "${S3FS_PID}" --no-headers
+    if [ "$(uname)" = "Darwin" ]; then
+        ps -o args -p "${S3FS_PID}" | tail -n +2
+    else
+        ps -o args -p "${S3FS_PID}" --no-headers
+    fi
+}
+
+#
+# $1:    sleep seconds
+# $2:    OS type(ex. 'Darwin', unset(means all os type))
+#
+# [NOTE] macos fuse-t
+# macos fuse-t mounts over NFS, and the mtime/ctime/atime attribute
+# values are in seconds(not m/u/n-sec).
+# Therefore, unlike tests on other OSs, we have to wait at least 1
+# second.
+# This function is called primarily for this purpose.
+#
+function wait_ostype() {
+    if [ -z "$2" ] || uname | grep -q "$2"; then
+        if [ -n "$1" ] && ! (echo "$1" | grep -q '[^0-9]'); then
+            sleep "$1"
+        fi
+    fi
+}
+
+#
+# Avoid extended attribute errors when copying on macos(fuse-t)
+#
+# [NOTE][FIXME]
+# This avoids an error that occurs when copying (cp command) on macos
+# (fuse-t) stating that extended attributes cannot be copied and the
+# exit code becomes anything other than 0.
+#Even if this error occurs, the copy itself is successful.
+#
+# This issue is currently(2024/11/7) still in the process of being
+# fixed, so we will wait and see.
+# This issue only occurred in the test_multipart_mix test with the
+# nocopyapi option, but in macos-13 Github Actions, it occurs in
+# some tests that use the use_xattr option.
+#
+function cp_avoid_xattr_err() {
+    if uname | grep -q Darwin; then
+        if ! cp "$@"; then
+            return $?
+        fi
+    else
+        local CP_RESULT="";
+        if ! CP_RESULT=$(cp "$@" 2>&1); then
+            local CP_EXITCODE=$?
+            if ! echo "${CP_RESULT}" | grep -q -i "Result too large"; then
+                return "${CP_EXITCODE}"
+            fi
+            echo "[FIXME: MACOS] ${CP_RESULT}"
+        fi
+    fi
+    return 0
 }
 
 #

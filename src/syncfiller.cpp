@@ -18,40 +18,51 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#ifndef S3FS_AUTOLOCK_H_
-#define S3FS_AUTOLOCK_H_
+#include <cstdio>
+#include <cstdlib>
 
-#include <pthread.h>
+#include "s3fs_logger.h"
+#include "syncfiller.h"
 
 //-------------------------------------------------------------------
-// AutoLock Class
+// Class SyncFiller
 //-------------------------------------------------------------------
-class AutoLock
+SyncFiller::SyncFiller(void* buff, fuse_fill_dir_t filler) : filler_buff(buff), filler_func(filler)
 {
-    public:
-      enum Type {
-          NO_WAIT        = 1,
-          ALREADY_LOCKED = 2,
-          NONE           = 0
-      };
+    if(!filler_buff || !filler_func){
+        S3FS_PRN_CRIT("Internal error: SyncFiller constructor parameter is critical value.");
+        abort();
+    }
+}
 
-    private:
-        pthread_mutex_t* const auto_mutex;
-        bool is_lock_acquired;
+//
+// See. prototype fuse_fill_dir_t in fuse.h
+//
+int SyncFiller::Fill(const std::string& name, const struct stat *stbuf, off_t off)
+{
+    const std::lock_guard<std::mutex> lock(filler_lock);
 
-    private:
-        AutoLock(const AutoLock&) = delete;
-        AutoLock(AutoLock&&) = delete;
-        AutoLock& operator=(const AutoLock&) = delete;
-        AutoLock& operator=(AutoLock&&) = delete;
+    int result = 0;
+    if(filled.insert(name).second){
+        result = filler_func(filler_buff, name.c_str(), stbuf, off);
+    }
+    return result;
+}
 
-    public:
-        explicit AutoLock(pthread_mutex_t* pmutex, Type type = NONE);
-        ~AutoLock();
-        bool isLockAcquired() const;
-};
+int SyncFiller::SufficiencyFill(const std::vector<std::string>& pathlist)
+{
+    const std::lock_guard<std::mutex> lock(filler_lock);
 
-#endif // S3FS_AUTOLOCK_H_
+    int result = 0;
+    for(auto it = pathlist.cbegin(); it != pathlist.cend(); ++it) {
+        if(filled.insert(*it).second){
+            if(0 != filler_func(filler_buff, it->c_str(), nullptr, 0)){
+                result = 1;
+            }
+        }
+    }
+    return result;
+}
 
 /*
 * Local variables:

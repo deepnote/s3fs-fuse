@@ -22,7 +22,9 @@
 #define S3FS_STRING_UTIL_H_
 
 #include <cstring>
+#include <ctime>
 #include <string>
+#include <strings.h>
 
 //
 // A collection of string utilities for manipulating URLs and HTTP responses.
@@ -30,12 +32,20 @@
 //-------------------------------------------------------------------
 // Global variables
 //-------------------------------------------------------------------
-extern const char SPACES[];
+static constexpr char SPACES[] = " \t\r\n";
 
 //-------------------------------------------------------------------
 // Inline functions
 //-------------------------------------------------------------------
-static inline int is_prefix(const char *str, const char *prefix) { return strncmp(str, prefix, strlen(prefix)) == 0; }
+class CaseInsensitiveStringView {
+public:
+    explicit CaseInsensitiveStringView(const std::string &str) : str(str.c_str()) {}
+    bool operator==(const char *other) const { return strcasecmp(str, other) == 0; }
+    bool is_prefix(const char *prefix) const { return strncasecmp(str, prefix, strlen(prefix)) == 0; }
+private:
+    const char *str;
+};
+static inline bool is_prefix(const char *str, const char *prefix) { return strncmp(str, prefix, strlen(prefix)) == 0; }
 static inline const char* SAFESTRPTR(const char *strptr) { return strptr ? strptr : ""; }
 
 //-------------------------------------------------------------------
@@ -53,14 +63,12 @@ static inline const char* SAFESTRPTR(const char *strptr) { return strptr ? strpt
 // Utilities
 //-------------------------------------------------------------------
 // TODO: rename to to_string?
-std::string str(const struct timespec value);
+std::string str(const struct timespec& value);
 
-#ifdef __MSYS__
 //
-// Polyfill for strptime function.
+// Cross-platform strptime
 //
-char* strptime(const char* s, const char* f, struct tm* tm);
-#endif
+const char* s3fs_strptime(const char* s, const char* f, struct tm* tm);
 //
 // Convert string to off_t.  Returns false on bad input.
 // Replacement for C++11 std::stoll.
@@ -79,6 +87,7 @@ std::string trim_left(std::string s, const char *t = SPACES);
 std::string trim_right(std::string s, const char *t = SPACES);
 std::string trim(std::string s, const char *t = SPACES);
 std::string lower(std::string s);
+std::string upper(std::string s);
 std::string peeloff(std::string s);
 
 //

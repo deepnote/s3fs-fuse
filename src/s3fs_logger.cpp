@@ -23,6 +23,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <strings.h>
 
 #include "common.h"
 #include "s3fs_logger.h"
@@ -30,14 +31,13 @@
 //-------------------------------------------------------------------
 // S3fsLog class : variables
 //-------------------------------------------------------------------
-const int               S3fsLog::NEST_MAX;
-const char* const       S3fsLog::nest_spaces[S3fsLog::NEST_MAX] = {"", "  ", "    ", "      "};
-const char              S3fsLog::LOGFILEENV[]     = "S3FS_LOGFILE";
-const char              S3fsLog::MSGTIMESTAMP[]   = "S3FS_MSGTIMESTAMP";
+constexpr char          S3fsLog::LOGFILEENV[];
+constexpr const char*   S3fsLog::nest_spaces[];
+constexpr char          S3fsLog::MSGTIMESTAMP[];
 S3fsLog*                S3fsLog::pSingleton       = nullptr;
 S3fsLog::s3fs_log_level S3fsLog::debug_level      = S3fsLog::LEVEL_CRIT;
 FILE*                   S3fsLog::logfp            = nullptr;
-std::string*            S3fsLog::plogfile         = nullptr;
+std::string             S3fsLog::logfile;
 bool                    S3fsLog::time_stamp       = true;
 
 //-------------------------------------------------------------------
@@ -87,11 +87,11 @@ bool S3fsLog::ReopenLogfile()
         S3FS_PRN_INFO("Currently the log file is output to stdout/stderr.");
         return true;
     }
-    if(!S3fsLog::plogfile){
-        S3FS_PRN_ERR("There is a problem with the path to the log file being nullptr.");
+    if(!S3fsLog::logfile.empty()){
+        S3FS_PRN_ERR("There is a problem with the path to the log file being empty.");
         return false;
     }
-    std::string tmp = *(S3fsLog::plogfile);
+    std::string tmp = S3fsLog::logfile;
     return S3fsLog::pSingleton->LowSetLogfile(tmp.c_str());
 }
 
@@ -142,12 +142,9 @@ S3fsLog::~S3fsLog()
         FILE*    oldfp = S3fsLog::logfp;
         S3fsLog::logfp = nullptr;
         if(oldfp && 0 != fclose(oldfp)){
-            S3FS_PRN_ERR("Could not close old log file(%s), but continue...", (S3fsLog::plogfile ? S3fsLog::plogfile->c_str() : "null"));
+            S3FS_PRN_ERR("Could not close old log file(%s), but continue...", (S3fsLog::logfile.empty() ? S3fsLog::logfile.c_str() : "null"));
         }
-        if(S3fsLog::plogfile){
-            delete S3fsLog::plogfile;
-            S3fsLog::plogfile = nullptr;
-        }
+        S3fsLog::logfile.clear();
         S3fsLog::pSingleton  = nullptr;
         S3fsLog::debug_level = S3fsLog::LEVEL_CRIT;
 
@@ -191,14 +188,11 @@ bool S3fsLog::LowSetLogfile(const char* pfile)
     if(!pfile){
         // close log file if it is opened
         if(S3fsLog::logfp && 0 != fclose(S3fsLog::logfp)){
-            S3FS_PRN_ERR("Could not close log file(%s).", (S3fsLog::plogfile ? S3fsLog::plogfile->c_str() : "null"));
+            S3FS_PRN_ERR("Could not close log file(%s).", (S3fsLog::logfile.empty() ? S3fsLog::logfile.c_str() : "null"));
             return false;
         }
         S3fsLog::logfp = nullptr;
-        if(S3fsLog::plogfile){
-            delete S3fsLog::plogfile;
-            S3fsLog::plogfile = nullptr;
-        }
+        S3fsLog::logfile.clear();
     }else{
         // open new log file
         //
@@ -214,13 +208,12 @@ bool S3fsLog::LowSetLogfile(const char* pfile)
         // switch new log file and close old log file if it is opened
         FILE*    oldfp = S3fsLog::logfp;
         if(oldfp && 0 != fclose(oldfp)){
-            S3FS_PRN_ERR("Could not close old log file(%s).", (S3fsLog::plogfile ? S3fsLog::plogfile->c_str() : "null"));
+            S3FS_PRN_ERR("Could not close old log file(%s).", (!S3fsLog::logfile.empty() ? S3fsLog::logfile.c_str() : "null"));
             fclose(newfp);
             return false;
         }
         S3fsLog::logfp = newfp;
-        delete S3fsLog::plogfile;
-        S3fsLog::plogfile = new std::string(pfile);
+        S3fsLog::logfile = pfile;
     }
     return true;
 }

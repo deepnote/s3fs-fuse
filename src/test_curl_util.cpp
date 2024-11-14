@@ -54,7 +54,7 @@ const std::string& S3fsCred::GetBucket()
 
 #define ASSERT_IS_SORTED(x) assert_is_sorted((x), __FILE__, __LINE__)
 
-void assert_is_sorted(struct curl_slist* list, const char *file, int line)
+void assert_is_sorted(const struct curl_slist* list, const char *file, int line)
 {
     for(; list != nullptr; list = list->next){
         std::string key1 = list->data;
@@ -150,7 +150,7 @@ void test_slist_remove()
     curl_slist_free_all(list);
 }
 
-int main(int argc, char *argv[])
+int main(int argc, const char *argv[])
 {
     test_sort_insert();
     test_slist_remove();

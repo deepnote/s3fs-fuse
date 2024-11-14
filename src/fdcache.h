@@ -21,7 +21,12 @@
 #ifndef S3FS_FDCACHE_H_
 #define S3FS_FDCACHE_H_
 
+#include <mutex>
+#include <string>
+
+#include "common.h"
 #include "fdcache_entity.h"
+#include "s3fs_util.h"
 
 //------------------------------------------------
 // class FdManager
@@ -30,32 +35,42 @@ class FdManager
 {
   private:
       static FdManager       singleton;
-      static pthread_mutex_t fd_manager_lock;
-      static pthread_mutex_t cache_cleanup_lock;
-      static pthread_mutex_t reserved_diskspace_lock;
-      static bool            is_lock_init;
+      static std::mutex      fd_manager_lock;
+      static std::mutex      cache_cleanup_lock;
+      static std::mutex      reserved_diskspace_lock;
+      static std::mutex      except_entmap_lock;
       static std::string     cache_dir;
       static bool            check_cache_dir_exist;
-      static off_t           free_disk_space;       // limit free disk space
-      static off_t           fake_used_disk_space;  // difference between fake free disk space and actual at startup(for test/debug)
+      static off_t           free_disk_space GUARDED_BY(reserved_diskspace_lock);  // limit free disk space
+      static off_t           fake_used_disk_space GUARDED_BY(reserved_diskspace_lock);  // difference between fake free disk space and actual at startup(for test/debug)
       static std::string     check_cache_output;
       static bool            checked_lseek;
       static bool            have_lseek_hole;
       static std::string     tmp_dir;
 
-      fdent_map_t            fent;
+      fdent_map_t            fent GUARDED_BY(fd_manager_lock);
+      fdent_map_t            except_fent GUARDED_BY(except_entmap_lock);  // A map of delayed deletion fdentity
 
   private:
-      static off_t GetFreeDiskSpace(const char* path);
-      static bool IsDir(const std::string* dir);
+      static off_t GetFreeDiskSpaceHasLock(const char* path) REQUIRES(FdManager::reserved_diskspace_lock);
+      static off_t GetTotalDiskSpace(const char* path);
+      static bool IsDir(const std::string& dir);
+      static int GetVfsStat(const char* path, struct statvfs* vfsbuf);
+      static off_t GetEnsureFreeDiskSpaceHasLock() REQUIRES(FdManager::reserved_diskspace_lock);
 
-      int GetPseudoFdCount(const char* path);
-      void CleanupCacheDirInternal(const std::string &path = "");
+      // Returns the number of open pseudo fd.
+      int GetPseudoFdCount(const char* path) REQUIRES(fd_manager_lock);
+      bool UpdateEntityToTempPath() REQUIRES(fd_manager_lock);
+      void CleanupCacheDirInternal(const std::string &path = "") REQUIRES(cache_cleanup_lock);
       bool RawCheckAllCache(FILE* fp, const char* cache_stat_top_dir, const char* sub_path, int& total_file_cnt, int& err_file_cnt, int& err_dir_cnt);
 
   public:
       FdManager();
       ~FdManager();
+      FdManager(const FdManager&) = delete;
+      FdManager(FdManager&&) = delete;
+      FdManager& operator=(const FdManager&) = delete;
+      FdManager& operator=(FdManager&&) = delete;
 
       // Reference singleton
       static FdManager* get() { return &singleton; }
@@ -74,25 +89,34 @@ class FdManager
       static bool CheckCacheDirExist();
       static bool HasOpenEntityFd(const char* path);
       static int GetOpenFdCount(const char* path);
-      static off_t GetEnsureFreeDiskSpace();
+      static off_t GetEnsureFreeDiskSpace()
+      {
+          const std::lock_guard<std::mutex> lock(FdManager::reserved_diskspace_lock);
+          return FdManager::GetEnsureFreeDiskSpaceHasLock();
+      }
       static off_t SetEnsureFreeDiskSpace(off_t size);
       static bool InitFakeUsedDiskSize(off_t fake_freesize);
-      static bool IsSafeDiskSpace(const char* path, off_t size);
+      static bool IsSafeDiskSpace(const char* path, off_t size, bool withmsg = false);
       static void FreeReservedDiskSpace(off_t size);
       static bool ReserveDiskSpace(off_t size);
       static bool HaveLseekHole();
       static bool SetTmpDir(const char* dir);
       static bool CheckTmpDirExist();
-      static FILE* MakeTempFile();
+      static std::unique_ptr<FILE, decltype(&s3fs_fclose)> MakeTempFile();
+      static off_t GetTotalDiskSpaceByRatio(int ratio);
 
       // Return FdEntity associated with path, returning nullptr on error.  This operation increments the reference count; callers must decrement via Close after use.
-      FdEntity* GetFdEntity(const char* path, int& existfd, bool newfd = true, AutoLock::Type locktype = AutoLock::NONE);
-      FdEntity* Open(int& fd, const char* path, const headers_t* pmeta, off_t size, const struct timespec& ts_mctime, int flags, bool force_tmpfile, bool is_create, bool ignore_modify, AutoLock::Type type);
+      FdEntity* GetFdEntity(const char* path, int& existfd, bool newfd = true) {
+          const std::lock_guard<std::mutex> lock(FdManager::fd_manager_lock);
+          return GetFdEntityHasLock(path, existfd, newfd);
+      }
+      FdEntity* GetFdEntityHasLock(const char* path, int& existfd, bool newfd = true) REQUIRES(FdManager::fd_manager_lock);
+      FdEntity* Open(int& fd, const char* path, const headers_t* pmeta, off_t size, const struct timespec& ts_mctime, int flags, bool force_tmpfile, bool is_create, bool ignore_modify);
       FdEntity* GetExistFdEntity(const char* path, int existfd = -1);
       FdEntity* OpenExistFdEntity(const char* path, int& fd, int flags = O_RDONLY);
       void Rename(const std::string &from, const std::string &to);
       bool Close(FdEntity* ent, int fd);
-      bool ChangeEntityToTempPath(FdEntity* ent, const char* path);
+      bool ChangeEntityToTempPath(std::shared_ptr<FdEntity> ent, const char* path);
       void CleanupCacheDir();
 
       bool CheckAllCache();

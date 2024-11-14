@@ -19,64 +19,36 @@
  */
 
 #include <cstdlib>
+#include <mutex>
 
 #include "s3fs_logger.h"
 #include "fdcache_untreated.h"
-#include "autolock.h"
 
 //------------------------------------------------
 // UntreatedParts methods
 //------------------------------------------------
-UntreatedParts::UntreatedParts() : last_tag(0) //, is_lock_init(false)
-{
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-#if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif
-
-    int result;
-    if(0 != (result = pthread_mutex_init(&untreated_list_lock, &attr))){
-        S3FS_PRN_CRIT("failed to init untreated_list_lock: %d", result);
-        abort();
-    }
-    is_lock_init = true;
-}
-
-UntreatedParts::~UntreatedParts()
-{
-    if(is_lock_init){
-        int result;
-        if(0 != (result = pthread_mutex_destroy(&untreated_list_lock))){
-            S3FS_PRN_CRIT("failed to destroy untreated_list_lock: %d", result);
-            abort();
-        }
-        is_lock_init = false;
-    }
-}
-
 bool UntreatedParts::empty()
 {
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
     return untreated_list.empty();
 }
 
 bool UntreatedParts::AddPart(off_t start, off_t size)
 {
     if(start < 0 || size <= 0){
-        S3FS_PRN_ERR("Paramter are wrong(start=%lld, size=%lld).", static_cast<long long int>(start), static_cast<long long int>(size));
+        S3FS_PRN_ERR("Parameter are wrong(start=%lld, size=%lld).", static_cast<long long int>(start), static_cast<long long int>(size));
         return false;
     }
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
     ++last_tag;
 
     // Check the overlap with the existing part and add the part.
-    for(untreated_list_t::iterator iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
+    for(auto iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
         if(iter->stretch(start, size, last_tag)){
             // the part was stretched, thus check if it overlaps with next parts
-            untreated_list_t::iterator niter = iter;
-            for(++niter; niter != untreated_list.end(); ){
+            auto niter = iter;
+            for(++niter; niter != untreated_list.cend(); ){
                 if(!iter->stretch(niter->start, niter->size, last_tag)){
                     // This next part does not overlap with the current part
                     break;
@@ -102,13 +74,13 @@ bool UntreatedParts::AddPart(off_t start, off_t size)
 bool UntreatedParts::RowGetPart(off_t& start, off_t& size, off_t max_size, off_t min_size, bool lastpart) const
 {
     if(max_size <= 0 || min_size < 0 || max_size < min_size){
-        S3FS_PRN_ERR("Paramter are wrong(max_size=%lld, min_size=%lld).", static_cast<long long int>(max_size), static_cast<long long int>(min_size));
+        S3FS_PRN_ERR("Parameter are wrong(max_size=%lld, min_size=%lld).", static_cast<long long int>(max_size), static_cast<long long int>(min_size));
         return false;
     }
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
     // Check the overlap with the existing part and add the part.
-    for(untreated_list_t::const_iterator iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
+    for(auto iter = untreated_list.cbegin(); iter != untreated_list.cend(); ++iter){
         if(!lastpart || iter->untreated_tag == last_tag){
             if(min_size <= iter->size){
                 if(iter->size <= max_size){
@@ -137,17 +109,17 @@ bool UntreatedParts::RowGetPart(off_t& start, off_t& size, off_t max_size, off_t
 bool UntreatedParts::ClearParts(off_t start, off_t size)
 {
     if(start < 0 || size < 0){
-        S3FS_PRN_ERR("Paramter are wrong(start=%lld, size=%lld).", static_cast<long long int>(start), static_cast<long long int>(size));
+        S3FS_PRN_ERR("Parameter are wrong(start=%lld, size=%lld).", static_cast<long long int>(start), static_cast<long long int>(size));
         return false;
     }
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
     if(untreated_list.empty()){
         return true;
     }
 
     // Check the overlap with the existing part.
-    for(untreated_list_t::iterator iter = untreated_list.begin(); iter != untreated_list.end(); ){
+    for(auto iter = untreated_list.begin(); iter != untreated_list.end(); ){
         if(0 != size && (start + size) <= iter->start){
             // clear area is in front of iter area, no more to do.
             break;
@@ -193,9 +165,9 @@ bool UntreatedParts::ClearParts(off_t start, off_t size)
 //
 bool UntreatedParts::GetLastUpdatePart(off_t& start, off_t& size) const
 {
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
-    for(untreated_list_t::const_iterator iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
+    for(auto iter = untreated_list.cbegin(); iter != untreated_list.cend(); ++iter){
         if(iter->untreated_tag == last_tag){
             start = iter->start;
             size  = iter->size;
@@ -213,15 +185,15 @@ bool UntreatedParts::GetLastUpdatePart(off_t& start, off_t& size) const
 //
 bool UntreatedParts::ReplaceLastUpdatePart(off_t start, off_t size)
 {
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
-    for(untreated_list_t::iterator iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
+    for(auto iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
         if(iter->untreated_tag == last_tag){
             if(0 < size){
                 iter->start = start;
                 iter->size  = size;
             }else{
-                iter = untreated_list.erase(iter);
+                untreated_list.erase(iter);
             }
             return true;
         }
@@ -234,9 +206,9 @@ bool UntreatedParts::ReplaceLastUpdatePart(off_t start, off_t size)
 //
 bool UntreatedParts::RemoveLastUpdatePart()
 {
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
-    for(untreated_list_t::iterator iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
+    for(auto iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
         if(iter->untreated_tag == last_tag){
             untreated_list.erase(iter);
             return true;
@@ -250,7 +222,7 @@ bool UntreatedParts::RemoveLastUpdatePart()
 //
 bool UntreatedParts::Duplicate(untreated_list_t& list)
 {
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
     list = untreated_list;
     return true;
@@ -258,10 +230,10 @@ bool UntreatedParts::Duplicate(untreated_list_t& list)
 
 void UntreatedParts::Dump()
 {
-    AutoLock auto_lock(&untreated_list_lock);
+    const std::lock_guard<std::mutex> lock(untreated_list_lock);
 
     S3FS_PRN_DBG("untreated list = [");
-    for(untreated_list_t::const_iterator iter = untreated_list.begin(); iter != untreated_list.end(); ++iter){
+    for(auto iter = untreated_list.cbegin(); iter != untreated_list.cend(); ++iter){
         S3FS_PRN_DBG("    {%014lld - %014lld : tag=%ld}", static_cast<long long int>(iter->start), static_cast<long long int>(iter->size), iter->untreated_tag);
     }
     S3FS_PRN_DBG("]");

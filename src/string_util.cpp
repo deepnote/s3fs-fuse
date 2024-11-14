@@ -18,13 +18,15 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
 #include <climits>
 #include <iomanip>
-
 #include <sstream>
+#include <string>
+#include <utility>
 
 #include "s3fs_logger.h"
 #include "string_util.h"
@@ -32,13 +34,12 @@
 //-------------------------------------------------------------------
 // Global variables
 //-------------------------------------------------------------------
-const char SPACES[] = " \t\r\n";
 
 //-------------------------------------------------------------------
 // Functions
 //-------------------------------------------------------------------
 
-std::string str(const struct timespec value)
+std::string str(const struct timespec& value)
 {
     std::ostringstream s;
     s << value.tv_sec;
@@ -48,23 +49,18 @@ std::string str(const struct timespec value)
     return s.str();
 }
 
-#ifdef __MSYS__
-/*
- * Polyfill for strptime function
- *
- * This source code is from https://gist.github.com/jeremyfromearth/5694aa3a66714254752179ecf3c95582 .
- */
-char* strptime(const char* s, const char* f, struct tm* tm)
+// This source code is from https://gist.github.com/jeremyfromearth/5694aa3a66714254752179ecf3c95582 .
+const char* s3fs_strptime(const char* s, const char* f, struct tm* tm)
 {
     std::istringstream input(s);
+    // TODO: call to setlocale required?
     input.imbue(std::locale(setlocale(LC_ALL, nullptr)));
     input >> std::get_time(tm, f);
     if (input.fail()) {
         return nullptr;
     }
-    return (char*)(s + input.tellg());
+    return s + input.tellg();
 }
-#endif
 
 bool s3fs_strtoofft(off_t* value, const char* str, int base)
 {
@@ -98,10 +94,13 @@ off_t cvt_strtoofft(const char* str, int base)
 
 std::string lower(std::string s)
 {
-    // change each character of the std::string to lower case
-    for(size_t i = 0; i < s.length(); i++){
-        s[i] = tolower(s[i]);
-    }
+    std::transform(s.cbegin(), s.cend(), s.begin(), ::tolower);
+    return s;
+}
+
+std::string upper(std::string s)
+{
+    std::transform(s.cbegin(), s.cend(), s.begin(), ::toupper);
     return s;
 }
 
@@ -127,10 +126,12 @@ std::string trim(std::string s, const char *t /* = SPACES */)
 
 std::string peeloff(std::string s)
 {
-    if(s.size() < 2 || *s.begin() != '"' || *s.rbegin() != '"'){
+    if(s.size() < 2 || *s.cbegin() != '"' || *s.rbegin() != '"'){
         return s;
     }
-    return s.substr(1, s.size() - 2);
+    s.erase(s.size() - 1);
+    s.erase(0, 1);
+    return s;
 }
 
 //
@@ -147,9 +148,9 @@ std::string peeloff(std::string s)
 //                   Therefore, it is a function to use as URL encoding
 //                   for use in query strings.
 //
-static const char* encode_general_except_chars = ".-_~";    // For general URL encode
-static const char* encode_path_except_chars    = ".-_~/";   // For fuse(included path) URL encode
-static const char* encode_query_except_chars   = ".-_~=&%"; // For query params(and encoded string)
+static constexpr char encode_general_except_chars[] = ".-_~";    // For general URL encode
+static constexpr char encode_path_except_chars[]    = ".-_~/";   // For fuse(included path) URL encode
+static constexpr char encode_query_except_chars[]   = ".-_~=&%"; // For query params(and encoded string)
 
 static std::string rawUrlEncode(const std::string &s, const char* except_chars)
 {
@@ -297,7 +298,7 @@ bool get_unixtime_from_iso8601(const char* pdate, time_t& unixtime)
     }
 
     struct tm tm;
-    const char* prest = strptime(pdate, "%Y-%m-%dT%T", &tm);
+    const char* prest = s3fs_strptime(pdate, "%Y-%m-%dT%T", &tm);
     if(prest == pdate){
         // wrong format
         return false;
@@ -381,7 +382,7 @@ std::string s3fs_hex_upper(const unsigned char* input, size_t length)
 
 std::string s3fs_base64(const unsigned char* input, size_t length)
 {
-    static const char base[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+    static constexpr char base[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
 
     std::string result;
     result.reserve(((length + 3 - 1) / 3) * 4 + 1);
@@ -403,7 +404,7 @@ std::string s3fs_base64(const unsigned char* input, size_t length)
     return result;
 }
 
-inline unsigned char char_decode64(const char ch)
+static inline unsigned char char_decode64(const char ch)
 {
     unsigned char by;
     if('A' <= ch && ch <= 'Z'){                   // A - Z
@@ -460,7 +461,7 @@ std::string s3fs_decode64(const char* input, size_t input_len)
 
 // Base location for transform.  The range 0xE000 - 0xF8ff
 // is a private range, se use the start of this range.
-static const unsigned int escape_base = 0xe000;
+static constexpr unsigned int escape_base = 0xe000;
 
 // encode bytes into wobbly utf8.  
 // 'result' can be null. returns true if transform was needed.

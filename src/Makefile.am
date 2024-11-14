@@ -36,7 +36,6 @@ s3fs_SOURCES = \
     metaheader.cpp \
     mpu_util.cpp \
     curl.cpp \
-    curl_handlerpool.cpp \
     curl_multi.cpp \
     curl_util.cpp \
     s3objlist.cpp \
@@ -44,6 +43,7 @@ s3fs_SOURCES = \
     string_util.cpp \
     s3fs_cred.cpp \
     s3fs_util.cpp \
+    s3fs_threadreqs.cpp \
     fdcache.cpp \
     fdcache_entity.cpp \
     fdcache_page.cpp \
@@ -54,8 +54,8 @@ s3fs_SOURCES = \
     fdcache_untreated.cpp \
     addhead.cpp \
     sighandlers.cpp \
-    autolock.cpp \
     threadpoolman.cpp \
+    syncfiller.cpp \
     common_auth.cpp
 if USE_SSL_OPENSSL
     s3fs_SOURCES += openssl_auth.cpp
@@ -102,7 +102,9 @@ TESTS = \
     test_string_util
 
 clang-tidy:
-	clang-tidy $(s3fs_SOURCES) -- $(DEPS_CFLAGS) $(CPPFLAGS)
+	clang-tidy -extra-arg-before=-xc++ \
+		*.h $(s3fs_SOURCES) test_curl_util.cpp test_page_list.cpp test_string_util.cpp \
+		-- $(DEPS_CFLAGS) $(CPPFLAGS)
 
 #
 # Local variables:

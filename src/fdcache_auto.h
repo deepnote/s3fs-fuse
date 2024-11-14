@@ -23,7 +23,7 @@
 
 #include <fcntl.h>
 
-#include "autolock.h"
+#include "common.h"
 #include "metaheader.h"
 
 class FdEntity;
@@ -42,22 +42,20 @@ class AutoFdEntity
       FdEntity* pFdEntity;
       int       pseudo_fd;
 
-  private:
+  public:
+      AutoFdEntity();
+      ~AutoFdEntity();
       AutoFdEntity(const AutoFdEntity&) = delete;
       AutoFdEntity(AutoFdEntity&&) = delete;
       AutoFdEntity& operator=(const AutoFdEntity&) = delete;
       AutoFdEntity& operator=(AutoFdEntity&&) = delete;
-
-  public:
-      AutoFdEntity();
-      ~AutoFdEntity();
 
       bool Close();
       int Detach();
       FdEntity* Attach(const char* path, int existfd);
       int GetPseudoFd() const { return pseudo_fd; }
 
-      FdEntity* Open(const char* path, const headers_t* pmeta, off_t size, const struct timespec& ts_mctime, int flags, bool force_tmpfile, bool is_create, bool ignore_modify, AutoLock::Type type, int* error = nullptr);
+      FdEntity* Open(const char* path, const headers_t* pmeta, off_t size, const struct timespec& ts_mctime, int flags, bool force_tmpfile, bool is_create, bool ignore_modify, int* error = nullptr);
       FdEntity* GetExistFdEntity(const char* path, int existfd = -1);
       FdEntity* OpenExistFdEntity(const char* path, int flags = O_RDONLY);
 };

@@ -18,47 +18,44 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#ifndef S3FS_CURL_HANDLERPOOL_H_
-#define S3FS_CURL_HANDLERPOOL_H_
+#ifndef SYNCFILLER_H_
+#define SYNCFILLER_H_
 
-#include <cassert>
-#include <curl/curl.h>
-#include <list>
+#include <string>
+#include <mutex>
+#include <vector>
+#include <set>
 
-//----------------------------------------------
-// Typedefs
-//----------------------------------------------
-typedef std::list<CURL*>            hcurllist_t;
+#include "s3fs.h"
 
 //----------------------------------------------
-// class CurlHandlerPool
+// class SyncFiller
 //----------------------------------------------
-class CurlHandlerPool
+//
+// A synchronous class that calls the fuse_fill_dir_t
+// function that processes the readdir data
+//
+class SyncFiller
 {
-    public:
-        explicit CurlHandlerPool(int maxHandlers) : mMaxHandlers(maxHandlers)
-        {
-            assert(maxHandlers > 0);
-        }
-        CurlHandlerPool(const CurlHandlerPool&) = delete;
-        CurlHandlerPool(CurlHandlerPool&&) = delete;
-        CurlHandlerPool& operator=(const CurlHandlerPool&) = delete;
-        CurlHandlerPool& operator=(CurlHandlerPool&&) = delete;
-
-        bool Init();
-        bool Destroy();
-
-        CURL* GetHandler(bool only_pool);
-        void ReturnHandler(CURL* hCurl, bool restore_pool);
-        void ResetHandler(CURL* hCurl);
-
     private:
-        int             mMaxHandlers;
-        pthread_mutex_t mLock;
-        hcurllist_t     mPool;
+        mutable std::mutex      filler_lock;
+        void*                   filler_buff;
+        fuse_fill_dir_t         filler_func;
+        std::set<std::string>   filled;
+
+    public:
+        explicit SyncFiller(void* buff = nullptr, fuse_fill_dir_t filler = nullptr);
+        ~SyncFiller() = default;
+        SyncFiller(const SyncFiller&) = delete;
+        SyncFiller(SyncFiller&&) = delete;
+        SyncFiller& operator=(const SyncFiller&) = delete;
+        SyncFiller& operator=(SyncFiller&&) = delete;
+
+        int Fill(const std::string& name, const struct stat *stbuf, off_t off);
+        int SufficiencyFill(const std::vector<std::string>& pathlist);
 };
 
-#endif // S3FS_CURL_HANDLERPOOL_H_
+#endif // SYNCFILLER_H_
 
 /*
 * Local variables:
